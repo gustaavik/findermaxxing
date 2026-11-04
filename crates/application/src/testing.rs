@@ -124,6 +124,16 @@ impl FakeVfs {
         self.insert(&path, node(&path, EntryKind::File, content.to_vec()));
     }
 
+    /// Sets an item's modification time (as if edited then).
+    pub fn set_modified(&self, absolute: &str, modified: domain::Timestamp) {
+        let path = self.path(absolute);
+        let node = self.lock().nodes.get(&path).cloned();
+        if let Some(mut node) = node {
+            node.metadata.modified = Some(modified);
+            self.insert(&path, node);
+        }
+    }
+
     pub fn remove(&self, absolute: &str) {
         let path = self.path(absolute);
         self.remove_tree(&path);
@@ -1338,5 +1348,288 @@ impl crate::ports::DriveConnector for FakeDriveConnector {
 
     fn disconnect(&self, id: AccountId) {
         self.connected.lock().unwrap_or_else(PoisonError::into_inner).retain(|c| *c != id);
+    }
+}
+
+const FAKE_EMBEDDING_DIMENSIONS: usize = 64;
+
+/// Bag of words hashed into a small vector: texts sharing words are similar.
+fn bag_of_words(text: &str) -> crate::ports::Embedding {
+    let mut vector = vec![0.0_f32; FAKE_EMBEDDING_DIMENSIONS];
+    for word in text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        let hash = word.to_lowercase().bytes().fold(7_u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
+        vector[usize::try_from(hash % FAKE_EMBEDDING_DIMENSIONS as u64).unwrap_or_default()] += 1.0;
+    }
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        vector.iter_mut().for_each(|v| *v /= norm);
+    }
+    vector
+}
+
+/// A text "model" that matches shared words; counts passages embedded.
+#[derive(Debug, Default)]
+pub struct FakeTextEmbedder {
+    embedded: Mutex<usize>,
+}
+
+impl FakeTextEmbedder {
+    #[must_use]
+    pub fn passages_embedded(&self) -> usize {
+        *self.embedded.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl crate::ports::TextEmbedder for FakeTextEmbedder {
+    fn model(&self) -> crate::ports::ModelId {
+        crate::ports::ModelId("fake-text".into())
+    }
+
+    fn relevance_floor(&self) -> f32 {
+        0.3
+    }
+
+    fn embed_passages(
+        &self,
+        passages: Vec<String>,
+    ) -> BoxFuture<'static, Result<Vec<crate::ports::Embedding>, crate::ports::EmbedError>> {
+        *self.embedded.lock().unwrap_or_else(PoisonError::into_inner) += passages.len();
+        future::ready(Ok(passages.iter().map(|p| bag_of_words(p)).collect())).boxed()
+    }
+
+    fn embed_query(
+        &self,
+        query: &str,
+    ) -> BoxFuture<'static, Result<crate::ports::Embedding, crate::ports::EmbedError>> {
+        future::ready(Ok(bag_of_words(query))).boxed()
+    }
+}
+
+/// An image "model" that sees what the file name says.
+#[derive(Debug, Default)]
+pub struct FakeImageEmbedder;
+
+impl crate::ports::ImageEmbedder for FakeImageEmbedder {
+    fn model(&self) -> crate::ports::ModelId {
+        crate::ports::ModelId("fake-image".into())
+    }
+
+    fn relevance_floor(&self) -> f32 {
+        0.3
+    }
+
+    fn embed_image(
+        &self,
+        file: LocalFile,
+    ) -> BoxFuture<'static, Result<Option<crate::ports::Embedding>, crate::ports::EmbedError>> {
+        let name = file.path().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        future::ready(Ok(Some(bag_of_words(&name)))).boxed()
+    }
+
+    fn embed_query(
+        &self,
+        query: &str,
+    ) -> BoxFuture<'static, Result<crate::ports::Embedding, crate::ports::EmbedError>> {
+        future::ready(Ok(bag_of_words(query))).boxed()
+    }
+}
+
+/// Reads the content of `FakeVfs` items through their fake local paths.
+#[derive(Debug)]
+pub struct FakeExtractor {
+    fake: FakeVfs,
+}
+
+impl FakeExtractor {
+    #[must_use]
+    pub fn new(fake: FakeVfs) -> Self {
+        Self { fake }
+    }
+}
+
+impl crate::ports::ContentExtractor for FakeExtractor {
+    fn extract(
+        &self,
+        file: &LocalFile,
+        _category: domain::FileCategory,
+    ) -> BoxFuture<'static, Result<Option<String>, VfsError>> {
+        let prefix = format!("{FAKE_LOCAL_ROOT}/{}", self.fake.traits.scheme);
+        let path = file.path().to_string_lossy().into_owned();
+        let content = path.strip_prefix(&prefix).and_then(|absolute| self.fake.contents(absolute));
+        let text = content.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).filter(|t| !t.trim().is_empty());
+        future::ready(Ok(text)).boxed()
+    }
+}
+
+/// A brute-force vector index in memory.
+#[derive(Debug, Default)]
+pub struct InMemorySemanticIndex {
+    items: Mutex<BTreeMap<StoragePath, (crate::ports::IndexedItem, Vec<crate::ports::IndexedPassage>)>>,
+}
+
+impl crate::ports::SemanticIndex for InMemorySemanticIndex {
+    fn indexed(
+        &self,
+        location: &StoragePath,
+    ) -> BoxFuture<'static, Result<Option<crate::ports::IndexedItem>, StoreError>> {
+        let items = self.items.lock().unwrap_or_else(PoisonError::into_inner);
+        future::ready(Ok(items.get(location).map(|(item, _)| item.clone()))).boxed()
+    }
+
+    fn upsert(
+        &self,
+        item: crate::ports::IndexedItem,
+        passages: Vec<crate::ports::IndexedPassage>,
+    ) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.items.lock().unwrap_or_else(PoisonError::into_inner).insert(item.location.clone(), (item, passages));
+        future::ready(Ok(())).boxed()
+    }
+
+    fn remove(&self, locations: Vec<StoragePath>) -> BoxFuture<'static, Result<(), StoreError>> {
+        let mut items = self.items.lock().unwrap_or_else(PoisonError::into_inner);
+        for location in locations {
+            items.remove(&location);
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn locations_within(&self, folder: &StoragePath) -> BoxFuture<'static, Result<Vec<StoragePath>, StoreError>> {
+        let items = self.items.lock().unwrap_or_else(PoisonError::into_inner);
+        future::ready(Ok(items.keys().filter(|l| l.is_within(folder)).cloned().collect())).boxed()
+    }
+
+    fn search(
+        &self,
+        query: crate::ports::IndexQuery,
+    ) -> BoxFuture<'static, Result<Vec<crate::ports::IndexHit>, StoreError>> {
+        let items = self.items.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut hits: Vec<crate::ports::IndexHit> = items
+            .values()
+            .filter(|(item, passages)| {
+                item.kind == query.kind
+                    && item.model == query.model
+                    && !passages.is_empty()
+                    && query.category.is_none_or(|c| domain::category_matches(c, item.category))
+                    && query.modified.is_none_or(|range| item.fingerprint.modified.is_some_and(|m| range.contains(m)))
+                    && (query.within.is_empty() || query.within.iter().any(|w| item.location.is_within(w)))
+            })
+            .map(|(item, passages)| {
+                let best = query.vector.as_ref().and_then(|v| {
+                    passages
+                        .iter()
+                        .map(|p| (p.vector.iter().zip(v).map(|(a, b)| a * b).sum::<f32>(), p))
+                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                });
+                crate::ports::IndexHit {
+                    item: item.clone(),
+                    similarity: best.map_or(0.0, |(s, _)| s),
+                    snippet: best.map(|(_, p)| p.snippet.clone()),
+                }
+            })
+            .collect();
+        if query.vector.is_some() {
+            hits.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
+        } else {
+            hits.sort_by_key(|hit| std::cmp::Reverse(hit.item.fingerprint.modified));
+        }
+        hits.truncate(query.limit);
+        future::ready(Ok(hits)).boxed()
+    }
+
+    fn all_locations(&self) -> BoxFuture<'static, Result<Vec<StoragePath>, StoreError>> {
+        future::ready(Ok(self.items.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect())).boxed()
+    }
+
+    fn count(&self) -> BoxFuture<'static, Result<u64, StoreError>> {
+        let items = self.items.lock().unwrap_or_else(PoisonError::into_inner);
+        future::ready(Ok(items.values().filter(|(_, p)| !p.is_empty()).count() as u64)).boxed()
+    }
+
+    fn clear(&self) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.items.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        future::ready(Ok(())).boxed()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryAiSettings {
+    settings: Mutex<Option<crate::ports::AiSettings>>,
+}
+
+impl crate::ports::AiSettingsStore for InMemoryAiSettings {
+    fn load(&self) -> BoxFuture<'static, Result<Option<crate::ports::AiSettings>, StoreError>> {
+        future::ready(Ok(self.settings.lock().unwrap_or_else(PoisonError::into_inner).clone())).boxed()
+    }
+
+    fn save(&self, settings: crate::ports::AiSettings) -> BoxFuture<'static, Result<(), StoreError>> {
+        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(settings);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// Installs instantly, reporting the pack's size as progress.
+#[derive(Debug, Default)]
+pub struct FakeModelInstaller {
+    installed: Mutex<Vec<crate::ports::ModelPack>>,
+}
+
+impl FakeModelInstaller {
+    pub const PACK_SIZE: ByteSize = ByteSize(1000);
+}
+
+impl crate::ports::ModelInstaller for FakeModelInstaller {
+    fn installed(&self, pack: crate::ports::ModelPack) -> bool {
+        self.installed.lock().unwrap_or_else(PoisonError::into_inner).contains(&pack)
+    }
+
+    fn download_size(&self, _pack: crate::ports::ModelPack) -> ByteSize {
+        Self::PACK_SIZE
+    }
+
+    fn source(&self, _pack: crate::ports::ModelPack) -> String {
+        "fake://models".into()
+    }
+
+    fn install(
+        &self,
+        pack: crate::ports::ModelPack,
+        progress: ProgressCallback,
+        cancel: CancelToken,
+    ) -> BoxFuture<'static, Result<(), VfsError>> {
+        if cancel.is_cancelled() {
+            return future::ready(Err(VfsError::Cancelled)).boxed();
+        }
+        progress(Self::PACK_SIZE);
+        self.installed.lock().unwrap_or_else(PoisonError::into_inner).push(pack);
+        future::ready(Ok(())).boxed()
+    }
+
+    fn uninstall(&self, pack: crate::ports::ModelPack) -> BoxFuture<'static, Result<(), VfsError>> {
+        self.installed.lock().unwrap_or_else(PoisonError::into_inner).retain(|p| *p != pack);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// Keeps every status the indexer reported.
+#[derive(Debug, Default)]
+pub struct RecordingIndexObserver {
+    statuses: Mutex<Vec<domain::IndexStatus>>,
+}
+
+impl RecordingIndexObserver {
+    #[must_use]
+    pub fn last(&self) -> Option<domain::IndexStatus> {
+        self.statuses.lock().unwrap_or_else(PoisonError::into_inner).last().cloned()
+    }
+
+    #[must_use]
+    pub fn all(&self) -> Vec<domain::IndexStatus> {
+        self.statuses.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl crate::ports::IndexObserver for RecordingIndexObserver {
+    fn status(&self, status: &domain::IndexStatus) {
+        self.statuses.lock().unwrap_or_else(PoisonError::into_inner).push(status.clone());
     }
 }

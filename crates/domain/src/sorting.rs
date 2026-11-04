@@ -9,6 +9,8 @@ pub enum SortKey {
     Size,
     Modified,
     Kind,
+    /// The order results arrived in (best match first, for content search).
+    Relevance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,6 +39,10 @@ pub struct SortSpec {
 impl SortSpec {
     #[must_use]
     pub fn compare(&self, a: &FileEntry, b: &FileEntry) -> Ordering {
+        if self.key == SortKey::Relevance {
+            // Everything ties, so stable insertion keeps the ranking.
+            return Ordering::Equal;
+        }
         self.folder_ordering(a, b).then_with(|| self.directed(self.primary(a, b).then_with(|| by_name(a, b))))
     }
 
@@ -53,6 +59,7 @@ impl SortSpec {
             SortKey::Size => a.metadata().size.cmp(&b.metadata().size),
             SortKey::Modified => a.metadata().modified.cmp(&b.metadata().modified),
             SortKey::Kind => extension(a).cmp(&extension(b)),
+            SortKey::Relevance => Ordering::Equal,
         }
     }
 

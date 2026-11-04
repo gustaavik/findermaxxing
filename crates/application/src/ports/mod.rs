@@ -17,6 +17,7 @@ mod places;
 mod preview;
 mod remote_item;
 mod saved_searches;
+mod semantic;
 mod servers;
 mod stream;
 mod watcher;
@@ -42,6 +43,10 @@ pub use preview::{
 };
 pub use remote_item::{ItemProperties, ItemVersion, MetadataEditor, Presigner, PropertyChanges, VersionLister};
 pub use saved_searches::{NewSavedSearch, SavedSearchStore, StoreError};
+pub use semantic::{
+    AiSettings, AiSettingsStore, ContentExtractor, EmbedError, Embedding, ImageEmbedder, IndexHit, IndexObserver,
+    IndexQuery, IndexedItem, IndexedPassage, ModelId, ModelInstaller, ModelPack, SemanticIndex, TextEmbedder,
+};
 pub use servers::{ConnectError, NewServerAccount, ServerAccountStore, ServerConnector};
 pub use stream::{ByteStream, DynReader, DynWriter, Reader, ResumeState, ResumedSink, WriteSink, Writer, skip_bytes};
 pub use watcher::{DynWatcher, Watcher};

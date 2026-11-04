@@ -1,6 +1,8 @@
+mod ai_search;
 mod bulk_rename_entries;
 mod create_folder;
 mod drives;
+mod indexer;
 mod item_details;
 mod list_directory;
 mod offline;
@@ -11,15 +13,21 @@ mod rename_entry;
 mod s3_accounts;
 mod saved_searches;
 mod search_files;
+mod semantic_search;
 mod servers;
 mod transfer_entries;
 mod trash_entries;
 mod undo_redo;
 mod watch_directory;
 
+pub use ai_search::{
+    AiSearchError, AiSearchServices, ChangeIndexScope, DisableAiSearch, EnableAiSearch, GetAiSettings, PauseIndexing,
+    ScopeChange,
+};
 pub use bulk_rename_entries::BulkRenameEntries;
 pub use create_folder::CreateFolder;
 pub use drives::{AddDrive, ConnectDrive, DriveError, DriveServices, ListDrives, RemoveDrive};
+pub use indexer::{Indexer, IndexerControl, IndexerParts, PassOutcome, RESCAN_INTERVAL, THROTTLE, indexer};
 pub use item_details::{
     CreateShareLink, GetItemProperties, ListItemVersions, MAX_SHARE_LINK_VALIDITY, UpdateItemProperties,
 };
@@ -35,6 +43,7 @@ pub use s3_accounts::{
 };
 pub use saved_searches::{DeleteSavedSearch, ListSavedSearches, SaveSearch, UNTITLED_SEARCH};
 pub use search_files::{SearchEvent, SearchFiles};
+pub use semantic_search::{MAX_RESULTS, SemanticResult, SemanticSearch, SemanticSearchError};
 pub use servers::{AddServer, ConnectServer, ListServers, RemoveServer, ServerError, ServerServices};
 pub use transfer_entries::{
     CopyEntries, DiscardTransfer, ListInterruptedTransfers, MoveEntries, ResumeTransfer, TransferRequest,

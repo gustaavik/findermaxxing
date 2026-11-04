@@ -13,6 +13,8 @@ ToolBar {
     readonly property int kind: kindBox.currentValue
     readonly property int date: dateBox.currentValue
     readonly property int size: sizeBox.currentValue
+    /// Search what files say (the AI index) instead of their names.
+    readonly property bool contents: contentsButton.checked
 
     signal changed
     signal done
@@ -34,8 +36,29 @@ ToolBar {
             text: qsTr("Searching “%1”").arg(bar.controller.title)
             font.bold: true
         }
+        ButtonGroup { id: modeGroup }
+        Button {
+            text: qsTr("Names")
+            checkable: true
+            checked: !bar.controller.contentSearch
+            ButtonGroup.group: modeGroup
+            onClicked: bar.changed()
+            ToolTip.visible: hovered
+            ToolTip.text: qsTr("Match words in file names")
+        }
+        Button {
+            id: contentsButton
+            text: qsTr("Contents (AI)")
+            checkable: true
+            checked: bar.controller.contentSearch
+            ButtonGroup.group: modeGroup
+            onClicked: bar.changed()
+            ToolTip.visible: hovered
+            ToolTip.text: qsTr("Find files by what they say or show, e.g. “invoices from last spring”")
+        }
         ComboBox {
             id: kindBox
+            visible: !bar.contents
             textRole: "text"
             valueRole: "value"
             Accessible.name: qsTr("Kind")
@@ -54,6 +77,7 @@ ToolBar {
         }
         ComboBox {
             id: dateBox
+            visible: !bar.contents
             textRole: "text"
             valueRole: "value"
             Accessible.name: qsTr("Modified")
@@ -68,6 +92,7 @@ ToolBar {
         }
         ComboBox {
             id: sizeBox
+            visible: !bar.contents
             textRole: "text"
             valueRole: "value"
             Accessible.name: qsTr("Size")
@@ -88,6 +113,7 @@ ToolBar {
         }
         Button {
             text: qsTr("Save…")
+            visible: !bar.contents
             enabled: bar.controller.searching
             onClicked: saveDialog.open()
         }

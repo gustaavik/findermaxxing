@@ -8,6 +8,7 @@ use std::pin::Pin;
 
 use application::ports::NewSavedSearch;
 use application::use_cases::HiddenFiles;
+use application::use_cases::SemanticSearchError;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
 use domain::{
@@ -127,6 +128,8 @@ pub mod qobject {
         #[qproperty(bool, offline_capable)]
         #[qproperty(QString, search_status)]
         #[qproperty(QString, search_text)]
+        /// The search is a content (AI) search rather than a name search.
+        #[qproperty(bool, content_search)]
         #[qproperty(i32, search_kind)]
         #[qproperty(i32, search_date)]
         #[qproperty(i32, search_size)]
@@ -169,6 +172,10 @@ pub mod qobject {
             date: SearchDate,
             size: SearchSize,
         );
+        /// Searches the content index ("invoices from last spring") below the
+        /// current folder, best matches first.
+        #[qinvokable]
+        fn search_content(self: Pin<&mut FolderViewController>, text: &QString);
         #[qinvokable]
         fn clear_search(self: Pin<&mut FolderViewController>);
         #[qinvokable]
@@ -240,6 +247,8 @@ pub struct FolderViewControllerRust {
     /// The active search, if the view shows search results.
     query: Option<SearchQuery>,
     saved: Vec<SavedSearch>,
+    content_search: bool,
+    content_query: Option<String>,
 }
 
 impl Default for FolderViewControllerRust {
@@ -277,6 +286,8 @@ impl Default for FolderViewControllerRust {
             sort: SortSpec::default(),
             query: None,
             saved: Vec::new(),
+            content_search: false,
+            content_query: None,
         }
     }
 }
@@ -381,8 +392,21 @@ impl qobject::FolderViewController {
         self.restart_session();
     }
 
+    pub fn search_content(mut self: Pin<&mut Self>, text: &QString) {
+        let text = text.to_string().trim().to_owned();
+        if text.is_empty() {
+            return self.clear_search();
+        }
+        self.as_mut().set_query(None);
+        self.as_mut().set_searching(true);
+        self.as_mut().set_content_search(true);
+        self.as_mut().set_search_text(QString::from(&text));
+        self.as_mut().rust_mut().content_query = Some(text);
+        self.restart_session();
+    }
+
     pub fn clear_search(mut self: Pin<&mut Self>) {
-        if self.query.is_some() {
+        if self.query.is_some() || self.content_query.is_some() {
             self.as_mut().set_query(None);
             self.restart_session();
         }
@@ -495,6 +519,8 @@ impl qobject::FolderViewController {
         self.as_mut().set_search_date(options.date.repr);
         self.as_mut().set_search_size(options.size.repr);
         self.as_mut().set_search_status(QString::default());
+        self.as_mut().set_content_search(false);
+        self.as_mut().rust_mut().content_query = None;
         self.rust_mut().query = query;
     }
 
@@ -507,8 +533,13 @@ impl qobject::FolderViewController {
 
     fn start_session(mut self: Pin<&mut Self>, services: &AppServices, dir: StoragePath) {
         let generation = self.generation.wrapping_add(1);
-        let mode = self.query.clone().map_or(SessionMode::Browse, SessionMode::Search);
-        let config = SessionConfig { dir, hidden: self.hidden_policy(), sort: self.sort, mode };
+        let (mode, sort) = match (&self.content_query, &self.query) {
+            (Some(text), _) => {
+                (SessionMode::Content(text.clone()), SortSpec { key: SortKey::Relevance, ..SortSpec::default() })
+            }
+            (None, query) => (query.clone().map_or(SessionMode::Browse, SessionMode::Search), self.sort),
+        };
+        let config = SessionConfig { dir, hidden: self.hidden_policy(), sort, mode };
         let qt_thread = self.qt_thread();
         let sink: EventSink = Box::new(move |event| {
             // Fails only if the controller is already destroyed; the event is moot then.
@@ -553,6 +584,16 @@ impl qobject::FolderViewController {
             SessionEvent::Failed(error) => self.as_mut().set_error_message(QString::from(&user_message(&error))),
             SessionEvent::SearchProgress { folders_searched, unreadable_folders } => {
                 let status = search_options::status_text(folders_searched, unreadable_folders);
+                self.set_search_status(QString::from(&status));
+            }
+            SessionEvent::ContentResults(outcome) => {
+                let status = match outcome {
+                    Ok(0) => "Nothing in the index matches.".to_owned(),
+                    Ok(1) => "1 match, best first".to_owned(),
+                    Ok(count) => format!("{count} matches, best first"),
+                    Err(SemanticSearchError::Off) => "AI search is off. Turn it on in AI Search.".to_owned(),
+                    Err(error) => format!("AI search failed: {error}"),
+                };
                 self.set_search_status(QString::from(&status));
             }
         }

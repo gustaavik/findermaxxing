@@ -17,6 +17,7 @@ fn main() {
         "qml/Sidebar.qml",
         "qml/AddAccountDialog.qml",
         "qml/ConnectServerDialog.qml",
+        "qml/AiSearchDialog.qml",
         "qml/CostDialog.qml",
         "qml/InfoDialog.qml",
     ]);
@@ -36,6 +37,7 @@ fn main() {
             "src/services_bridge.rs",
             "src/clipboard_bridge.rs",
             "src/input_bridge.rs",
+            "src/clock_bridge.rs",
             "src/folder_view_controller.rs",
             "src/operations_controller.rs",
             "src/preview_controller.rs",
@@ -43,6 +45,7 @@ fn main() {
             "src/bulk_rename_controller.rs",
             "src/sidebar_controller.rs",
             "src/item_details_controller.rs",
+            "src/ai_search_controller.rs",
         ])
         .cpp_files([
             "cpp/entry_list_model.h",
@@ -53,6 +56,7 @@ fn main() {
             "cpp/job_list_model.cpp",
             "cpp/clipboard.cpp",
             "cpp/input.cpp",
+            "cpp/clock.cpp",
             "cpp/sidebar_model.h",
             "cpp/sidebar_model.cpp",
             "cpp/bootstrap.cpp",

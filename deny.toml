@@ -18,6 +18,13 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "folded into zbus; Linux keyring backend only" },
     { id = "RUSTSEC-2026-0371", reason = "folded into zbus; Linux keyring backend only" },
     { id = "RUSTSEC-2026-0372", reason = "folded into zbus; Linux keyring backend only" },
+    # paste is unmaintained (not vulnerable): a compile-time macro used by
+    # candle's gemm/pulp and tokenizers; nothing of it runs at run time.
+    { id = "RUSTSEC-2024-0436", reason = "build-time macro inside candle and tokenizers" },
+    # ttf-parser is unmaintained (not vulnerable). lopdf pulls it in for PDF
+    # fonts; text extraction runs under catch_unwind on files the user owns.
+    # Revisit when pdf-extract/lopdf move to skrifa.
+    { id = "RUSTSEC-2026-0192", reason = "lopdf font parsing in PDF text extraction" },
 ]
 
 [licenses]

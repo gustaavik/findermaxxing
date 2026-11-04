@@ -4,8 +4,10 @@
 //! use-case output into view-model updates. Everything testable without Qt
 //! (`view_model`, `history`, `row_format`, `error_messages`) is plain Rust.
 
+mod ai_search_controller;
 mod bulk_rename_controller;
 mod clipboard_bridge;
+mod clock_bridge;
 mod error_messages;
 mod file_urls;
 mod folder_view_controller;
@@ -27,8 +29,8 @@ mod sidebar_controller;
 mod view_model;
 
 pub use services::{
-    AppServices, CloudDrives, FileOperations, ItemDetails, Offline, Places, RemoteAccounts, SavedSearches,
-    ServerAccounts,
+    AiSearch, AppServices, CloudDrives, FileOperations, IndexStatusFeed, ItemDetails, Offline, Places, RemoteAccounts,
+    SavedSearches, ServerAccounts,
 };
 
 /// Starts the Qt event loop and blocks until the last window closes.

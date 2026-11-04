@@ -36,8 +36,12 @@ ApplicationWindow {
     OperationsController {
         id: fileOps
         services: window.services
-        // Folders that can't be watched (S3) reload when a job changes them.
+        // Folders that can't be watched (S3) reload when a job changes them,
+        // and the content index looks for what changed.
         onFoldersChanged: locations => {
+            if (aiSearch.enabled) {
+                aiSearch.rescan()
+            }
             for (let i = 0; i < views.count; ++i) {
                 views.itemAt(i).controller.reloadIfShowing(locations)
             }
@@ -47,6 +51,12 @@ ApplicationWindow {
     SidebarController {
         id: sidebarController
         services: window.services
+    }
+
+    AiSearchController {
+        id: aiSearch
+        services: window.services
+        Component.onCompleted: refresh()
     }
 
     // `opened` only exists because a ListModel needs at least one role.
@@ -92,6 +102,13 @@ ApplicationWindow {
                 ToolTip.visible: hovered
                 ToolTip.text: fileOps.redoText
                 Accessible.name: fileOps.canRedo ? fileOps.redoText : qsTr("Redo")
+            }
+            ToolButton {
+                text: aiSearch.working ? "✦ " + Math.round(Math.max(0, aiSearch.progress) * 100) + "%" : "✦"
+                onClicked: aiDialog.open()
+                ToolTip.visible: hovered
+                ToolTip.text: aiSearch.enabled ? aiSearch.statusText : qsTr("AI search is off")
+                Accessible.name: qsTr("AI search: %1").arg(aiSearch.enabled ? aiSearch.statusText : qsTr("off"))
             }
             ToolButton {
                 text: "+"
@@ -171,6 +188,11 @@ ApplicationWindow {
 
     CostDialog {
         operations: fileOps
+    }
+
+    AiSearchDialog {
+        id: aiDialog
+        controller: aiSearch
     }
 
     // Copies and moves a quit or crash cut short, offered once at start-up.

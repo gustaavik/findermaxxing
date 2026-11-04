@@ -5,7 +5,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use application::use_cases::{ChangeBatch, HiddenFiles, ListRequest, SearchEvent};
+use application::use_cases::{ChangeBatch, HiddenFiles, ListRequest, SearchEvent, SemanticSearchError};
+
+use crate::clock_bridge::query_clock;
 use application::{CancelToken, CancellationSource};
 use domain::{SearchQuery, SortSpec, StoragePath, Timestamp, VfsError};
 use futures::StreamExt;
@@ -28,6 +30,8 @@ pub(crate) enum SessionMode {
     Browse,
     /// Show everything below the folder that matches.
     Search(SearchQuery),
+    /// Show what the content index finds for a natural-language query.
+    Content(String),
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +47,12 @@ pub(crate) enum SessionEvent {
     Model(Vec<ModelUpdate>),
     Loading(bool),
     Failed(VfsError),
-    SearchProgress { folders_searched: u64, unreadable_folders: u64 },
+    SearchProgress {
+        folders_searched: u64,
+        unreadable_folders: u64,
+    },
+    /// A content search finished with this many results, or failed.
+    ContentResults(Result<usize, SemanticSearchError>),
 }
 
 #[derive(Debug)]
@@ -73,7 +82,7 @@ impl FolderSession {
             services: services.clone(),
             view_model: match &config.mode {
                 SessionMode::Browse => DirectoryViewModel::new(config.sort),
-                SessionMode::Search(_) => {
+                SessionMode::Search(_) | SessionMode::Content(_) => {
                     DirectoryViewModel::with_rows(config.sort, RowContext::SearchIn(config.dir.clone()))
                 }
             },
@@ -115,7 +124,35 @@ impl Worker {
         match self.config.mode.clone() {
             SessionMode::Browse => self.browse(commands).await,
             SessionMode::Search(query) => self.search(&query, commands).await,
+            SessionMode::Content(text) => self.content(&text, commands).await,
         }
+    }
+
+    async fn content(mut self, text: &str, mut commands: mpsc::UnboundedReceiver<SessionCommand>) {
+        self.run_content(text).await;
+        while let Some(command) = commands.recv().await {
+            match command {
+                SessionCommand::Sort(sort) => (self.sink)(SessionEvent::Model(vec![self.view_model.set_sort(sort)])),
+                SessionCommand::Reload => self.run_content(text).await,
+            }
+        }
+    }
+
+    /// The index answers at once; results arrive best first and stay in
+    /// that order unless the user sorts by a column.
+    async fn run_content(&mut self, text: &str) {
+        self.view_model.clear();
+        (self.sink)(SessionEvent::Loading(true));
+        let within = vec![self.config.dir.clone()];
+        let found = self.services.ai.search.execute(text, query_clock(), within).await;
+        let outcome = found.map(|results| {
+            let count = results.len();
+            self.view_model.add_batch(results.into_iter().map(|r| r.entry).collect());
+            count
+        });
+        (self.sink)(SessionEvent::Model(vec![self.view_model.snapshot()]));
+        (self.sink)(SessionEvent::ContentResults(outcome));
+        (self.sink)(SessionEvent::Loading(false));
     }
 
     async fn search(mut self, query: &SearchQuery, mut commands: mpsc::UnboundedReceiver<SessionCommand>) {

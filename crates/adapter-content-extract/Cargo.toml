@@ -1,0 +1,26 @@
+[package]
+name = "adapter-content-extract"
+description = "ContentExtractor: plain text from text files, PDF (pdf-extract), Office Open XML, OpenDocument, EPUB, HTML and RTF, for the content index."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+pdf-extract.workspace = true
+zip = { workspace = true, features = ["deflate"] }
+quick-xml.workspace = true
+
+[dev-dependencies]
+pdf-extract.workspace = true
+tempfile.workspace = true
+zip = { workspace = true, features = ["deflate"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

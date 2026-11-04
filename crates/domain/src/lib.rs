@@ -11,8 +11,10 @@ mod cost;
 mod drive;
 mod entry;
 mod error;
+mod indexing;
 mod job;
 mod naming;
+mod natural_query;
 mod operation;
 mod path;
 mod remote;
@@ -36,8 +38,13 @@ pub use drive::{
 };
 pub use entry::{EntryBatch, EntryKind, EntryMetadata, FileEntry, LIST_BATCH_SIZE, SymlinkTarget, Visibility};
 pub use error::{PathError, VfsError};
+pub use indexing::{
+    ContentKind, Fingerprint, IndexDecision, IndexScope, IndexStatus, MAX_PASSAGES, category_matches, index_decision,
+    passages, relevance,
+};
 pub use job::{JobPhase, JobProgress};
 pub use naming::{FIRST_DUPLICATE_NUMBER, first_free_name, numbered_name};
+pub use natural_query::{DateRange, ParsedQuery, QueryClock, parse_query};
 pub use operation::{Action, Operation, OperationKind, Relocation, TrashTicket};
 pub use path::{MountId, PathSegment, Scheme, StoragePath};
 pub use remote::{AccountId, Addressing, BucketName, S3_SCHEME, S3Account, S3Auth, S3Location};

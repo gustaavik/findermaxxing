@@ -3,6 +3,7 @@
 //! No other crate names concrete adapters.
 
 mod drives;
+mod indexing;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -42,14 +43,14 @@ const METADATA_FILE: &str = "metadata.sqlite3";
 const FILE_CACHE_FOLDER: &str = "files";
 const KNOWN_HOSTS_FILE: &str = "known_hosts";
 #[cfg(target_os = "macos")]
-const PLATFORM_DATA_HOME: &str = "Library/Application Support";
+pub(crate) const PLATFORM_DATA_HOME: &str = "Library/Application Support";
 #[cfg(not(target_os = "macos"))]
-const PLATFORM_DATA_HOME: &str = ".local/share";
+pub(crate) const PLATFORM_DATA_HOME: &str = ".local/share";
 #[cfg(target_os = "macos")]
 const PLATFORM_CACHE_HOME: &str = "Library/Caches";
 #[cfg(not(target_os = "macos"))]
 const PLATFORM_CACHE_HOME: &str = ".cache";
-const DATA_HOME_VARIABLE: &str = "XDG_DATA_HOME";
+pub(crate) const DATA_HOME_VARIABLE: &str = "XDG_DATA_HOME";
 const CACHE_HOME_VARIABLE: &str = "XDG_CACHE_HOME";
 
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +99,7 @@ fn start() -> Result<i32, StartupError> {
         credentials: credentials.clone(),
         connectors: providers.drives.connectors(),
     };
+    let ai = indexing::start(&handle, &mounts, &store, &home_dir())?;
     let accounts = AccountServices { store, credentials, connector: Arc::new(providers.s3.clone()) };
     let services = AppServices {
         list_directory: Arc::new(ListDirectory::new(mounts.clone())),
@@ -119,6 +121,7 @@ fn start() -> Result<i32, StartupError> {
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),
         drives: CloudDrives::new(&drives),
+        ai,
         offline: Offline::new(&mounts, &pins, Arc::new(cache)),
         item_details: ItemDetails::new(&mounts),
         mounts,
@@ -207,7 +210,7 @@ fn metadata_store(runtime: &Handle) -> Result<Arc<SqliteStore>, StoreError> {
 
 /// `~/Library/<…>/FinderMaxxing` on macOS; the XDG directory (or its
 /// default below home) elsewhere.
-fn platform_dir(xdg_variable: &str, platform_default: &str) -> PathBuf {
+pub(crate) fn platform_dir(xdg_variable: &str, platform_default: &str) -> PathBuf {
     let xdg = std::env::var_os(xdg_variable).map(PathBuf::from).filter(|p| p.is_absolute());
     let base = if cfg!(target_os = "macos") { None } else { xdg };
     base.unwrap_or_else(|| home_dir().join(platform_default)).join(APP_FOLDER)

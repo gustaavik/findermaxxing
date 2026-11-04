@@ -87,7 +87,11 @@ FocusScope {
     }
 
     function runSearch() {
-        controller.search(searchField.text, searchBar.kind, searchBar.date, searchBar.size)
+        if (searchBar.contents) {
+            controller.searchContent(searchField.text)
+        } else {
+            controller.search(searchField.text, searchBar.kind, searchBar.date, searchBar.size)
+        }
     }
 
     function endSearch() {

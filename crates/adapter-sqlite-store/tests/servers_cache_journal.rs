@@ -180,3 +180,80 @@ async fn drive_accounts_persist_and_ids_are_not_reused() {
         .unwrap();
     assert!(again.id.0 > work.id.0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_semantic_index_survives_a_restart_and_filters_like_the_fake() {
+    use application::ports::{IndexQuery, IndexedItem, IndexedPassage, ModelId, SemanticIndex};
+    use domain::{ContentKind, FileCategory, Fingerprint};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let model = ModelId("e5".into());
+    let unit = |i: usize| -> Vec<f32> { (0..8).map(|j| if j == i { 1.0 } else { 0.0 }).collect() };
+    let item = |name: &str, modified: i64| IndexedItem {
+        location: location(&format!("file:///docs/{name}")),
+        kind: ContentKind::Text,
+        category: FileCategory::Text,
+        fingerprint: Fingerprint { size: Some(ByteSize(10)), modified: Some(Timestamp::from_unix_millis(modified)) },
+        model: model.clone(),
+    };
+    let store = reopen(&path);
+    store
+        .upsert(
+            item("a.txt", 100),
+            vec![
+                IndexedPassage { snippet: "about cats".into(), vector: unit(0) },
+                IndexedPassage { snippet: "about invoices".into(), vector: unit(1) },
+            ],
+        )
+        .await
+        .unwrap();
+    store.upsert(item("b.txt", 200), vec![IndexedPassage { snippet: "dogs".into(), vector: unit(2) }]).await.unwrap();
+    store.upsert(item("empty.bin", 300), Vec::new()).await.unwrap();
+    drop(store);
+
+    let store = reopen(&path);
+    assert_eq!(store.count().await.unwrap(), 2, "items with nothing indexed don't count");
+    assert_eq!(
+        store.indexed(&location("file:///docs/empty.bin")).await.unwrap().map(|i| i.fingerprint.modified),
+        Some(Some(Timestamp::from_unix_millis(300)))
+    );
+    let query = IndexQuery {
+        vector: Some(unit(1)),
+        kind: ContentKind::Text,
+        model: model.clone(),
+        limit: 10,
+        modified: None,
+        category: None,
+        within: Vec::new(),
+    };
+    let hits = store.search(query.clone()).await.unwrap();
+    assert_eq!(hits[0].item.location, location("file:///docs/a.txt"));
+    assert_eq!(hits[0].snippet.as_deref(), Some("about invoices"), "the best passage is the snippet");
+    assert!((hits[0].similarity - 1.0).abs() < 0.01);
+    let other_model = store.search(IndexQuery { model: ModelId("other".into()), ..query.clone() }).await.unwrap();
+    assert!(other_model.is_empty(), "spaces of different models never mix");
+    let newest = store.search(IndexQuery { vector: None, ..query }).await.unwrap();
+    assert_eq!(
+        newest.iter().map(|h| h.item.location.path_string()).collect::<Vec<_>>(),
+        ["/docs/b.txt", "/docs/a.txt"]
+    );
+    SemanticIndex::remove(&store, vec![location("file:///docs/a.txt")]).await.unwrap();
+    drop(store);
+    assert_eq!(reopen(&path).count().await.unwrap(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ai_settings_survive_a_restart() {
+    use application::ports::{AiSettings, AiSettingsStore};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let settings = AiSettings {
+        enabled: true,
+        images: false,
+        paused: true,
+        scope: domain::IndexScope { include: vec![location("file:///docs")], exclude: Vec::new() },
+    };
+    assert_eq!(reopen(&path).load().await.unwrap(), None, "nothing chosen yet");
+    reopen(&path).save(settings.clone()).await.unwrap();
+    assert_eq!(reopen(&path).load().await.unwrap(), Some(settings));
+}

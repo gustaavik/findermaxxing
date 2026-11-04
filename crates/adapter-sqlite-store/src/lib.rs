@@ -1,7 +1,7 @@
 //! SQLite-backed metadata store. Implements `SavedSearchStore`,
 //! `AccountStore`, `ServerAccountStore` and `DriveAccountStore` (settings only: secrets live in
 //! the OS keychain), `FavoritesStore`, `PinStore`, `CacheIndex` and
-//! `TransferJournal`.
+//! `TransferJournal`, `SemanticIndex` and `AiSettingsStore`.
 //!
 //! The schema is versioned with `PRAGMA user_version`; each entry of
 //! [`MIGRATIONS`] runs exactly once, in order, inside a transaction.
@@ -13,6 +13,7 @@ mod favorites;
 mod journal;
 mod location_codec;
 mod query_format;
+mod semantic;
 mod servers;
 
 use std::path::Path;
@@ -98,6 +99,23 @@ const MIGRATIONS: &[&str] = &[
         name TEXT NOT NULL,
         email TEXT NOT NULL
     );",
+    "CREATE TABLE semantic_items (
+        location TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        category TEXT NOT NULL,
+        size INTEGER,
+        modified INTEGER,
+        model TEXT NOT NULL
+    );
+    CREATE TABLE semantic_passages (
+        location TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        snippet TEXT NOT NULL,
+        scale REAL NOT NULL,
+        vector BLOB NOT NULL,
+        PRIMARY KEY (location, ordinal)
+    );
+    CREATE TABLE ai_settings (id INTEGER PRIMARY KEY CHECK (id = 1), settings TEXT NOT NULL);",
 ];
 
 /// One connection, serialised by a mutex: metadata writes are rare and tiny.
@@ -105,6 +123,8 @@ const MIGRATIONS: &[&str] = &[
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
     runtime: Handle,
+    /// The semantic index, held in memory once first used (see `semantic`).
+    vectors: Arc<Mutex<Option<semantic::Vectors>>>,
 }
 
 impl SqliteStore {
@@ -129,7 +149,7 @@ impl SqliteStore {
 
     fn with_connection(mut connection: Connection, runtime: Handle) -> Result<Self, StoreError> {
         migrate(&mut connection)?;
-        Ok(Self { connection: Arc::new(Mutex::new(connection)), runtime })
+        Ok(Self { connection: Arc::new(Mutex::new(connection)), runtime, vectors: Arc::default() })
     }
 
     pub(crate) fn run<T: Send + 'static>(

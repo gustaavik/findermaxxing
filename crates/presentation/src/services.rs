@@ -5,6 +5,7 @@ use application::ports::{
     CacheJanitor, FavoritesStore, LocalFileOpener, MountResolver, PinStore, SavedSearchStore, TransferJournal,
     VolumeLister,
 };
+use application::ports::{IndexObserver, ModelInstaller};
 use application::use_cases::{
     AccountServices, AddBucket, AddFavorite, AddS3Account, BulkRenameEntries, ConnectSavedAccounts, CopyEntries,
     CreateFolder, CreateShareLink, DeletePermanently, DeleteSavedSearch, GetItemProperties, ListBuckets, ListDirectory,
@@ -16,6 +17,10 @@ use application::use_cases::{AddDrive, ConnectDrive, DriveServices, ListDrives, 
 use application::use_cases::{
     AddServer, ConnectServer, DiscardTransfer, ForgetLocalCopies, GetOfflineStatus, ListInterruptedTransfers,
     ListServers, MakeAvailableOffline, RemoveOfflineCopy, RemoveServer, ResumeTransfer, ServerServices,
+};
+use application::use_cases::{
+    AiSearchServices, ChangeIndexScope, DisableAiSearch, EnableAiSearch, GetAiSettings, IndexerControl, PauseIndexing,
+    SemanticSearch,
 };
 use domain::{CostPolicy, StoragePath};
 use tokio::runtime::Handle;
@@ -37,6 +42,7 @@ pub struct AppServices {
     pub accounts: RemoteAccounts,
     pub servers: ServerAccounts,
     pub drives: CloudDrives,
+    pub ai: AiSearch,
     pub offline: Offline,
     pub item_details: ItemDetails,
     /// Runs every background task of the UI (sessions, jobs, previews).
@@ -163,6 +169,80 @@ impl CloudDrives {
     }
 }
 
+/// AI search: settings, model installs, searching, and the indexer's status.
+#[derive(Clone)]
+pub struct AiSearch {
+    pub settings: Arc<GetAiSettings>,
+    pub enable: Arc<EnableAiSearch>,
+    pub disable: Arc<DisableAiSearch>,
+    pub pause: Arc<PauseIndexing>,
+    pub scope: Arc<ChangeIndexScope>,
+    pub search: Arc<SemanticSearch>,
+    pub models: Arc<dyn ModelInstaller>,
+    pub control: IndexerControl,
+    pub status: Arc<IndexStatusFeed>,
+}
+
+impl AiSearch {
+    #[must_use]
+    pub fn new(services: &AiSearchServices, search: SemanticSearch, status: Arc<IndexStatusFeed>) -> Self {
+        Self {
+            settings: Arc::new(GetAiSettings::new(services.clone())),
+            enable: Arc::new(EnableAiSearch::new(services.clone())),
+            disable: Arc::new(DisableAiSearch::new(services.clone())),
+            pause: Arc::new(PauseIndexing::new(services.clone())),
+            scope: Arc::new(ChangeIndexScope::new(services.clone())),
+            search: Arc::new(search),
+            models: services.installer.clone(),
+            control: services.control.clone(),
+            status,
+        }
+    }
+}
+
+impl std::fmt::Debug for AiSearch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiSearch").finish_non_exhaustive()
+    }
+}
+
+type StatusListener = Box<dyn Fn(&domain::IndexStatus) + Send + Sync>;
+
+/// The indexer's latest status, passed on to whoever listens (the AI search
+/// controller, once QML exists). Created before the UI, by the composition root.
+#[derive(Default)]
+pub struct IndexStatusFeed {
+    latest: std::sync::Mutex<domain::IndexStatus>,
+    listeners: std::sync::Mutex<Vec<StatusListener>>,
+}
+
+impl IndexStatusFeed {
+    #[must_use]
+    pub fn latest(&self) -> domain::IndexStatus {
+        self.latest.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub fn listen(&self, listener: StatusListener) {
+        listener(&self.latest());
+        self.listeners.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(listener);
+    }
+}
+
+impl IndexObserver for IndexStatusFeed {
+    fn status(&self, status: &domain::IndexStatus) {
+        *self.latest.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status.clone();
+        for listener in self.listeners.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter() {
+            listener(status);
+        }
+    }
+}
+
+impl std::fmt::Debug for IndexStatusFeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexStatusFeed").field("latest", &self.latest()).finish_non_exhaustive()
+    }
+}
+
 /// Keeping remote items available offline, and forgetting a removed
 /// account's local copies.
 #[derive(Debug, Clone)]
@@ -254,6 +334,40 @@ impl ItemDetails {
     }
 }
 
+/// AI search over fakes: a bag-of-words model and an in-memory index.
+#[cfg(test)]
+fn fake_ai_search(fake: &application::testing::FakeVfs, mounts: &Arc<dyn MountResolver>) -> AiSearch {
+    let ai_settings = Arc::new(application::testing::InMemoryAiSettings::default());
+    let installer = Arc::new(application::testing::FakeModelInstaller::default());
+    let index = Arc::new(application::testing::InMemorySemanticIndex::default());
+    let (_indexer, control) = application::use_cases::indexer(application::use_cases::IndexerParts {
+        mounts: Arc::clone(mounts),
+        extractor: Arc::new(application::testing::FakeExtractor::new(fake.clone())),
+        text: Arc::new(application::testing::FakeTextEmbedder::default()),
+        images: Arc::new(application::testing::FakeImageEmbedder),
+        index: index.clone(),
+        settings: ai_settings.clone(),
+        installer: installer.clone(),
+        clock: Arc::new(application::testing::InstantClock),
+        observer: Arc::new(IndexStatusFeed::default()),
+    });
+    let ai_services = AiSearchServices {
+        settings: ai_settings.clone(),
+        installer: installer.clone(),
+        index: index.clone(),
+        control,
+        default_scope: vec![fake.path("/")],
+    };
+    let search = SemanticSearch::new(
+        Arc::new(application::testing::FakeTextEmbedder::default()),
+        Arc::new(application::testing::FakeImageEmbedder),
+        index,
+        ai_settings,
+        installer,
+    );
+    AiSearch::new(&ai_services, search, Arc::new(IndexStatusFeed::default()))
+}
+
 /// `AppServices` over in-memory fakes, for presentation tests.
 #[cfg(test)]
 pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices {
@@ -306,6 +420,7 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),
         drives: CloudDrives::new(&drives),
+        ai: fake_ai_search(fake, &mounts),
         offline: Offline::new(&mounts, &pins, Arc::new(application::testing::RecordingJanitor::default())),
         item_details: ItemDetails::new(&mounts),
         mounts,
