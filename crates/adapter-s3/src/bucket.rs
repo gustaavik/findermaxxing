@@ -2,39 +2,40 @@
 //! starts with its prefix or a zero-byte `prefix/` marker object exists.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use application::CancelToken;
 use application::ports::{
-    ByteStream, Copier, FolderMaker, ItemProperties, ItemVersion, Lister, LocalFile, Materializer, MetadataEditor,
-    Mover, Presigner, ProgressCallback, PropertyChanges, Reader, Remover, VersionLister, WriteSink, Writer,
+    ByteStream, Copier, FolderMaker, ItemProperties, ItemVersion, Lister, MetadataEditor, Mover, Presigner,
+    ProgressCallback, PropertyChanges, Reader, Remover, ResumeState, ResumedSink, VersionLister, WriteSink, Writer,
 };
 use aws_sdk_s3::Client;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream as SdkStream, DateTime};
-use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectIdentifier};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, MetadataDirective, ObjectIdentifier};
 use domain::{
-    BucketName, ByteSize, Capability, EntryBatch, EntryKind, EntryMetadata, FileEntry, LIST_BATCH_SIZE, PathError,
-    StoragePath, Timestamp, VfsError, Visibility,
+    BucketName, ByteSize, EntryBatch, EntryKind, EntryMetadata, FileEntry, LIST_BATCH_SIZE, PathError, StoragePath,
+    Timestamp, VfsError, Visibility,
 };
 use futures::future::BoxFuture;
 use futures::stream::{self, Stream};
-use futures::{FutureExt, StreamExt};
-use tokio::io::AsyncWriteExt;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use tokio::runtime::Handle;
 
 use crate::errors::from_sdk;
 use crate::keys::{DELIMITER, child_of, copy_source, key_of, prefix_of};
 use crate::writer::S3Sink;
 
+const INVALID_RANGE: &str = "InvalidRange";
 /// CopyObject's single-request limit; above it the application streams instead.
 const SERVER_SIDE_COPY_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 /// DeleteObjects accepts at most this many keys per request.
 const DELETE_BATCH: usize = 1000;
 const HIDDEN_PREFIX: char = '.';
 const MILLIS_PER_SECOND: i64 = 1000;
-const PARTIAL_DOWNLOAD_SUFFIX: &str = ".findermaxxing-partial";
+/// Byte ranges of a multipart server-side copy (each part may be up to 5 GB).
+const COPY_PART_SIZE: u64 = 512 * 1024 * 1024;
+const PARALLEL_COPY_PARTS: usize = 4;
 
 /// One bucket as a mount; obtained from [`crate::S3Service::open_bucket`].
 #[derive(Clone)]
@@ -42,12 +43,28 @@ pub struct BucketFs {
     client: Client,
     bucket: BucketName,
     runtime: Handle,
-    cache: PathBuf,
+    copy_limits: CopyLimits,
+}
+
+/// When server-side copies switch to multipart, and the part size then.
+#[derive(Debug, Clone, Copy)]
+struct CopyLimits {
+    single_request: u64,
+    part: u64,
 }
 
 impl BucketFs {
-    pub(crate) fn new(client: Client, bucket: BucketName, runtime: Handle, cache: PathBuf) -> Self {
-        Self { client, bucket, runtime, cache }
+    pub(crate) fn new(client: Client, bucket: BucketName, runtime: Handle) -> Self {
+        let copy_limits = CopyLimits { single_request: SERVER_SIDE_COPY_LIMIT, part: COPY_PART_SIZE };
+        Self { client, bucket, runtime, copy_limits }
+    }
+
+    /// Lowers the multipart-copy thresholds so tests can exercise that path
+    /// without 5 GB objects.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_copy_limits(self, single_request: u64, part: u64) -> Self {
+        Self { copy_limits: CopyLimits { single_request, part }, ..self }
     }
 
     fn bucket(&self) -> &str {
@@ -162,12 +179,84 @@ impl BucketFs {
         Ok(())
     }
 
+    /// One `CopyObject`, or a multipart copy for objects too large for it.
+    /// When the size isn't known, the single request is tried first.
     async fn copy_key(&self, from: &str, to: &str) -> Result<(), VfsError> {
-        self.client
+        self.copy_sized(from, to, None).await
+    }
+
+    async fn copy_sized(&self, from: &str, to: &str, size: Option<u64>) -> Result<(), VfsError> {
+        if let Some(size) = size.filter(|size| *size > self.copy_limits.single_request) {
+            return self.copy_in_parts(from, to, size).await;
+        }
+        let single = self
+            .client
             .copy_object()
             .bucket(self.bucket())
             .copy_source(copy_source(self.bucket(), from))
             .key(to)
+            .send()
+            .await
+            .map_err(from_sdk)
+            .map(drop);
+        match single {
+            Err(VfsError::NotFound | VfsError::PermissionDenied | VfsError::Cancelled) | Ok(()) => single,
+            Err(error) => match self.head(from).await? {
+                Some(head) if object_size(&head) > self.copy_limits.single_request => {
+                    self.copy_in_parts(from, to, object_size(&head)).await
+                }
+                _ => Err(error),
+            },
+        }
+    }
+
+    async fn copy_in_parts(&self, from: &str, to: &str, size: u64) -> Result<(), VfsError> {
+        let created =
+            self.client.create_multipart_upload().bucket(self.bucket()).key(to).send().await.map_err(from_sdk)?;
+        let id = created.upload_id().ok_or_else(|| VfsError::Io { message: "no upload id".into() })?.to_owned();
+        let result = self.copy_parts(from, to, &id, size).await;
+        if result.is_err() {
+            let _ = crate::writer::discard_upload(&self.client, &self.bucket, to, &id).await;
+        }
+        result
+    }
+
+    async fn copy_parts(&self, from: &str, to: &str, id: &str, size: u64) -> Result<(), VfsError> {
+        let source = copy_source(self.bucket(), from);
+        let part = self.copy_limits.part;
+        let ranges: Vec<(i32, u64, u64)> = (0..size.div_ceil(part))
+            .filter_map(|index| {
+                let start = index * part;
+                Some((i32::try_from(index + 1).ok()?, start, (start + part).min(size) - 1))
+            })
+            .collect();
+        let mut parts: Vec<CompletedPart> = stream::iter(ranges)
+            .map(|(number, start, end)| {
+                let request = self
+                    .client
+                    .upload_part_copy()
+                    .bucket(self.bucket())
+                    .key(to)
+                    .upload_id(id)
+                    .part_number(number)
+                    .copy_source(&source)
+                    .copy_source_range(format!("bytes={start}-{end}"));
+                async move {
+                    let output = request.send().await.map_err(from_sdk)?;
+                    let etag = output.copy_part_result().and_then(|r| r.e_tag()).map(str::to_owned);
+                    Ok::<_, VfsError>(CompletedPart::builder().set_e_tag(etag).part_number(number).build())
+                }
+            })
+            .buffer_unordered(PARALLEL_COPY_PARTS)
+            .try_collect()
+            .await?;
+        parts.sort_by_key(CompletedPart::part_number);
+        self.client
+            .complete_multipart_upload()
+            .bucket(self.bucket())
+            .key(to)
+            .upload_id(id)
+            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build())
             .send()
             .await
             .map_err(from_sdk)
@@ -345,15 +434,12 @@ impl Copier for BucketFs {
                 VfsError::NotFound
             });
         };
-        let size = ByteSize(head.content_length().and_then(|s| u64::try_from(s).ok()).unwrap_or_default());
-        if size.0 > SERVER_SIDE_COPY_LIMIT {
-            return Err(VfsError::Unsupported(Capability::ServerSideCopy));
-        }
+        let size = ByteSize(object_size(&head));
         self.require_absent(to).await?;
         if cancel.is_cancelled() {
             return Err(VfsError::Cancelled);
         }
-        self.copy_key(&key, &key_of(to)?).await?;
+        self.copy_sized(&key, &key_of(to)?, Some(size.0)).await?;
         progress(size);
         Ok(size)
     }
@@ -435,9 +521,22 @@ impl FolderMaker for BucketFs {
 
 impl Reader for BucketFs {
     async fn read(&self, path: &StoragePath, cancel: CancelToken) -> Result<ByteStream, VfsError> {
+        self.read_from(path, ByteSize(0), cancel).await
+    }
+
+    async fn read_from(
+        &self,
+        path: &StoragePath,
+        offset: ByteSize,
+        cancel: CancelToken,
+    ) -> Result<ByteStream, VfsError> {
         let key = key_of(path)?;
-        let output = match self.client.get_object().bucket(self.bucket()).key(&key).send().await.map_err(from_sdk) {
+        let range = (offset.0 > 0).then(|| format!("bytes={}-", offset.0));
+        let request = self.client.get_object().bucket(self.bucket()).key(&key).set_range(range);
+        let output = match request.send().await.map_err(from_sdk) {
             Ok(output) => output,
+            // Asking for the bytes after the end: there are none.
+            Err(VfsError::Io { message }) if message.starts_with(INVALID_RANGE) => return Ok(stream::empty().boxed()),
             Err(VfsError::NotFound) if self.prefix_exists(&prefix_of(path)?).await? => {
                 return Err(VfsError::IsADirectory);
             }
@@ -473,40 +572,22 @@ impl Writer for BucketFs {
             self.runtime.clone(),
         )))
     }
-}
 
-impl Materializer for BucketFs {
-    /// Downloads into the cache (reused while size and date match the object).
-    async fn local_file(&self, item: &StoragePath) -> Result<LocalFile, VfsError> {
-        let key = key_of(item)?;
-        let head = self.head(&key).await?.ok_or(VfsError::NotFound)?;
-        let target = self.cache.join(&key);
-        let expected = head.content_length().and_then(|s| u64::try_from(s).ok());
-        if is_fresh(&target, expected).await {
-            return Ok(LocalFile::new(target));
-        }
-        let mut chunks = self.read(item, CancelToken::never()).await?;
-        download(&target, &mut chunks).await?;
-        Ok(LocalFile::new(target))
+    /// The state is the multipart upload id.
+    async fn resume(&self, path: &StoragePath, state: &ResumeState) -> Result<ResumedSink, VfsError> {
+        self.require_absent(path).await?;
+        let (client, bucket, key) = (self.client.clone(), self.bucket.clone(), key_of(path)?);
+        let (sink, offset) = S3Sink::resume(client, bucket, key, state.0.clone(), self.runtime.clone()).await?;
+        Ok(ResumedSink { sink: Box::new(sink), offset })
+    }
+
+    async fn discard(&self, path: &StoragePath, state: &ResumeState) -> Result<(), VfsError> {
+        crate::writer::discard_upload(&self.client, &self.bucket, &key_of(path)?, &state.0).await
     }
 }
 
-async fn is_fresh(target: &Path, expected_size: Option<u64>) -> bool {
-    tokio::fs::metadata(target).await.is_ok_and(|metadata| Some(metadata.len()) == expected_size)
-}
-
-async fn download(target: &Path, chunks: &mut ByteStream) -> Result<(), VfsError> {
-    let io = |e: std::io::Error| VfsError::Io { message: e.to_string() };
-    if let Some(folder) = target.parent() {
-        tokio::fs::create_dir_all(folder).await.map_err(io)?;
-    }
-    let partial = target.with_extension(PARTIAL_DOWNLOAD_SUFFIX.trim_start_matches('.'));
-    let mut file = tokio::fs::File::create(&partial).await.map_err(io)?;
-    while let Some(chunk) = chunks.next().await {
-        file.write_all(&chunk?).await.map_err(io)?;
-    }
-    file.flush().await.map_err(io)?;
-    tokio::fs::rename(&partial, target).await.map_err(io)
+fn object_size(head: &aws_sdk_s3::operation::head_object::HeadObjectOutput) -> u64 {
+    head.content_length().and_then(|s| u64::try_from(s).ok()).unwrap_or_default()
 }
 
 impl MetadataEditor for BucketFs {

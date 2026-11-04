@@ -16,6 +16,8 @@ pub enum OperationError {
     NothingToUndo,
     #[error("there is nothing to redo")]
     NothingToRedo,
+    #[error("the app's settings couldn't be saved: {0}")]
+    Store(String),
 }
 
 impl OperationError {

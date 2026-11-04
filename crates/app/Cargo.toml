@@ -20,6 +20,10 @@ adapter-preview.workspace = true
 adapter-sqlite-store.workspace = true
 adapter-s3.workspace = true
 adapter-keyring.workspace = true
+adapter-file-cache.workspace = true
+adapter-sftp.workspace = true
+adapter-smb.workspace = true
+adapter-webdav.workspace = true
 presentation.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 thiserror.workspace = true

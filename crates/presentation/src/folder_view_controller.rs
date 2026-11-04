@@ -10,7 +10,9 @@ use application::ports::NewSavedSearch;
 use application::use_cases::HiddenFiles;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
-use domain::{Capability, S3Location, SavedSearch, SearchQuery, SortKey, SortOrder, SortSpec, StoragePath};
+use domain::{
+    Capability, S3Location, SavedSearch, SearchQuery, ServerLocation, SortKey, SortOrder, SortSpec, StoragePath,
+};
 
 use crate::error_messages::user_message;
 use crate::history::History;
@@ -120,6 +122,8 @@ pub mod qobject {
         #[qproperty(bool, can_trash)]
         /// A billed remote location (S3): share links and metadata are available.
         #[qproperty(bool, remote)]
+        /// A remote location whose items can be kept available offline.
+        #[qproperty(bool, offline_capable)]
         #[qproperty(QString, search_status)]
         #[qproperty(QString, search_text)]
         #[qproperty(i32, search_kind)]
@@ -219,6 +223,7 @@ pub struct FolderViewControllerRust {
     watched: bool,
     can_trash: bool,
     remote: bool,
+    offline_capable: bool,
     search_status: QString,
     search_text: QString,
     search_kind: i32,
@@ -257,6 +262,7 @@ impl Default for FolderViewControllerRust {
             watched: false,
             can_trash: false,
             remote: false,
+            offline_capable: false,
             search_status: QString::default(),
             search_text: QString::default(),
             search_kind: SearchKind::AnyKind.repr,
@@ -523,6 +529,8 @@ impl qobject::FolderViewController {
             self.as_mut().set_watched(capabilities.contains(Capability::Watch));
             self.as_mut().set_can_trash(capabilities.contains(Capability::Trash));
             self.as_mut().set_remote(capabilities.contains(Capability::Metered));
+            let is_remote = location.mount() != home.mount();
+            self.as_mut().set_offline_capable(is_remote && capabilities.contains(Capability::LocalAccess));
         }
         let can_go_back = self.history.can_go_back();
         let can_go_forward = self.history.can_go_forward();
@@ -591,10 +599,11 @@ fn parse_location(text: &str, home: &StoragePath) -> Option<StoragePath> {
 
 /// The folder's name; a bucket root is named after its bucket.
 fn location_title(location: &StoragePath) -> String {
-    match (location.name(), S3Location::of(location.mount())) {
-        (Some(name), _) => name.to_string(),
-        (None, Some(bucket)) => bucket.bucket.to_string(),
-        (None, None) => ROOT_TITLE.to_owned(),
+    match (location.name(), S3Location::of(location.mount()), ServerLocation::of(location.mount())) {
+        (Some(name), _, _) => name.to_string(),
+        (None, Some(bucket), _) => bucket.bucket.to_string(),
+        (None, None, Some(server)) => server.protocol.to_string(),
+        (None, None, None) => ROOT_TITLE.to_owned(),
     }
 }
 

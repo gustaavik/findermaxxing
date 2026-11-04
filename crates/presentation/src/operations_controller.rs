@@ -1,5 +1,6 @@
 //! `OperationsController`: one per window. Starts file-operation jobs, shows
-//! their progress, asks about conflicts, and drives undo/redo and the clipboard.
+//! their progress, asks about conflicts, and drives undo/redo, the clipboard,
+//! drag and drop, offline copies and resuming transfers a quit interrupted.
 //!
 //! Thin by design: every decision about *what* happens to files is made by
 //! the use cases; this object turns QML intents into use-case calls and job
@@ -12,6 +13,7 @@ use std::sync::Arc;
 
 use application::CancellationSource;
 use application::operations::{JobContext, OperationError};
+use application::ports::{InterruptedTransfer, JournaledKind};
 use application::use_cases::TransferRequest;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
@@ -23,7 +25,8 @@ use futures::channel::oneshot;
 
 use crate::clipboard_bridge::{clipboard_urls, set_clipboard_urls};
 use crate::error_messages::{open_message, operation_message};
-use crate::file_urls::{from_file_url, to_file_url};
+use crate::file_urls::{from_file_url, native_file_url, to_file_url};
+use crate::input_bridge::{DropModifier, drop_modifier};
 use crate::job_reporting::{QtConflictResolver, QtCostConfirmer, QtJobObserver};
 use crate::job_text::{
     TransferVerb, delete_title, redo_menu_text, redo_title, transfer_title, trash_title, undo_menu_text, undo_title,
@@ -92,6 +95,16 @@ pub mod qobject {
         StopAsking,
     }
 
+    /// What a drop does: Finder's rules (move within a volume, copy across)
+    /// unless a modifier key says otherwise. QML shares one namespace for all
+    /// of a type's enum values, so these must not reuse `PasteMode`'s names.
+    #[qenum(OperationsController)]
+    enum DropOperation {
+        FollowKeys,
+        AlwaysCopy,
+        AlwaysMove,
+    }
+
     #[qenum(OperationsController)]
     enum AnswerReach {
         ThisItem,
@@ -115,6 +128,9 @@ pub mod qobject {
         #[qproperty(bool, cost_pending)]
         #[qproperty(QString, cost_title)]
         #[qproperty(QString, cost_detail)]
+        /// Copy and move jobs a quit or crash cut short, waiting for Resume or Discard.
+        #[qproperty(i32, interrupted_count)]
+        #[qproperty(QString, interrupted_text)]
         type OperationsController = super::OperationsControllerRust;
     }
 
@@ -151,6 +167,33 @@ pub mod qobject {
         /// Re-reads the undo/redo labels after work done outside this controller.
         #[qinvokable]
         fn refresh_history(self: Pin<&mut OperationsController>);
+        /// Downloads items (folders recursively) and keeps them in the cache.
+        #[qinvokable]
+        fn make_available_offline(self: Pin<&mut OperationsController>, locations: &QStringList);
+        #[qinvokable]
+        fn remove_offline_copy(self: Pin<&mut OperationsController>, location: &QString);
+        /// Looks for transfers a quit or crash interrupted (at start-up).
+        #[qinvokable]
+        fn check_interrupted(self: Pin<&mut OperationsController>);
+        #[qinvokable]
+        fn resume_interrupted(self: Pin<&mut OperationsController>);
+        #[qinvokable]
+        fn discard_interrupted(self: Pin<&mut OperationsController>);
+        /// A drop on `destination`: `internal` holds our own locations (one per
+        /// line) when the drag came from this app; otherwise `urls` are
+        /// `file://` URLs from another app.
+        #[qinvokable]
+        fn drop_items(
+            self: Pin<&mut OperationsController>,
+            urls: &QStringList,
+            internal: &QString,
+            destination: &QString,
+            operation: DropOperation,
+        );
+        /// Gets local files for dragging items out to other apps; remote items
+        /// are downloaded first. Answers with `drag_ready`.
+        #[qinvokable]
+        fn prepare_drag(self: Pin<&mut OperationsController>, locations: &QStringList);
 
         /// A folder made by `newFolder`; the view selects it and starts renaming.
         #[qsignal]
@@ -162,17 +205,24 @@ pub mod qobject {
         /// can't be watched (S3) reload.
         #[qsignal]
         fn folders_changed(self: Pin<&mut OperationsController>, locations: QStringList);
+        /// `urls` are local `file://` URLs for other apps; `internal` the
+        /// original locations, one per line, for drops inside this app.
+        #[qsignal]
+        fn drag_ready(self: Pin<&mut OperationsController>, urls: QStringList, internal: QString);
     }
 
     impl cxx_qt::Threading for OperationsController {}
     impl cxx_qt::Initialize for OperationsController {}
 }
 
-use qobject::{AnswerReach, ConflictAnswer, CostAnswer, CostReach, JobListModel, PasteMode, ServicesHolder};
+use qobject::{
+    AnswerReach, ConflictAnswer, CostAnswer, CostReach, DropOperation, JobListModel, PasteMode, ServicesHolder,
+};
 
 const NOT_READY_MESSAGE: &str = "The application is still starting.";
 const INVALID_NAME_MESSAGE: &str = "Names can't be empty or contain \u{201c}/\u{201d}.";
 const PREPARING_DETAIL: &str = "Preparing…";
+const LOCATION_SEPARATOR: char = '\n';
 
 /// A conflict waiting for the user, oldest first.
 /// A cost confirmation waiting for the user.
@@ -223,6 +273,9 @@ pub struct OperationsControllerRust {
     clipboard_urls_sent: Vec<String>,
     next_job_id: i32,
     conflicts: VecDeque<PendingConflict>,
+    interrupted_count: i32,
+    interrupted_text: QString,
+    interrupted: Vec<InterruptedTransfer>,
 }
 
 impl Default for OperationsControllerRust {
@@ -248,6 +301,9 @@ impl Default for OperationsControllerRust {
             clipboard_urls_sent: Vec::new(),
             next_job_id: 1,
             conflicts: VecDeque::new(),
+            interrupted_count: 0,
+            interrupted_text: QString::default(),
+            interrupted: Vec::new(),
         }
     }
 }
@@ -318,6 +374,138 @@ impl qobject::OperationsController {
                 );
             }
         }
+    }
+
+    pub fn make_available_offline(mut self: Pin<&mut Self>, locations: &QStringList) {
+        let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
+        for location in decode_all(locations) {
+            let use_case = services.offline.make_available.clone();
+            let title = offline_title(&location);
+            self.as_mut().spawn_job(
+                title,
+                Vec::new(),
+                move |ctx| async move { use_case.execute(&location, &ctx).await },
+            );
+        }
+    }
+
+    pub fn remove_offline_copy(self: Pin<&mut Self>, location: &QString) {
+        let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
+        let Ok(location) = StoragePath::decode(&location.to_string()) else { return };
+        let use_case = services.offline.remove;
+        self.spawn_task(async move { use_case.execute(location).await }, |controller, result| {
+            if let Err(error) = result {
+                controller.report(&format!("The offline copy couldn't be removed: {error}"));
+            }
+        });
+    }
+
+    pub fn check_interrupted(self: Pin<&mut Self>) {
+        let Some(services) = self.app_services() else { return };
+        let use_case = services.operations.interrupted;
+        self.spawn_task(async move { use_case.execute().await.unwrap_or_default() }, |mut controller, found| {
+            let text = interrupted_text(&found);
+            controller.as_mut().set_interrupted_text(QString::from(&text));
+            controller.as_mut().set_interrupted_count(i32::try_from(found.len()).unwrap_or(i32::MAX));
+            controller.rust_mut().interrupted = found;
+        });
+    }
+
+    pub fn resume_interrupted(mut self: Pin<&mut Self>) {
+        let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
+        let interrupted = std::mem::take(&mut self.as_mut().rust_mut().interrupted);
+        self.as_mut().set_interrupted_count(0);
+        for transfer in interrupted {
+            let entry = &transfer.entry;
+            let verb = match entry.kind {
+                JournaledKind::Copy => TransferVerb::Copying,
+                JournaledKind::Move => TransferVerb::Moving,
+            };
+            let title = transfer_title(verb, &entry.sources, &entry.destination);
+            let mut affected = parents(&entry.sources);
+            affected.push(entry.destination.clone());
+            let use_case = services.operations.resume.clone();
+            self.as_mut()
+                .spawn_job(title, affected, move |ctx| async move { use_case.execute(&transfer, &ctx).await.result });
+        }
+    }
+
+    pub fn discard_interrupted(mut self: Pin<&mut Self>) {
+        let Some(services) = self.app_services() else { return };
+        let interrupted = std::mem::take(&mut self.as_mut().rust_mut().interrupted);
+        self.as_mut().set_interrupted_count(0);
+        let use_case = services.operations.discard;
+        services.runtime.spawn(async move {
+            for transfer in &interrupted {
+                // A row that can't be cleared shows up again next start.
+                let _ = use_case.execute(transfer).await;
+            }
+        });
+    }
+
+    pub fn drop_items(
+        self: Pin<&mut Self>,
+        urls: &QStringList,
+        internal: &QString,
+        destination: &QString,
+        operation: DropOperation,
+    ) {
+        let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
+        let Ok(destination) = StoragePath::decode(&destination.to_string()) else { return };
+        let internal = internal.to_string();
+        let sources: Vec<StoragePath> = if internal.trim().is_empty() {
+            let local = services.home.mount().clone();
+            QList::<QString>::from(urls).iter().filter_map(|url| from_file_url(&url.to_string(), &local)).collect()
+        } else {
+            internal.split(LOCATION_SEPARATOR).filter_map(|line| StoragePath::decode(line.trim()).ok()).collect()
+        };
+        // Dropping items back into the folder they came from does nothing.
+        let sources: Vec<StoragePath> =
+            sources.into_iter().filter(|source| source.parent().as_ref() != Some(&destination)).collect();
+        if sources.is_empty() {
+            return;
+        }
+        let mode = drop_mode(drop_operation_now(operation), &sources, &destination);
+        let mut affected = parents(&sources);
+        affected.push(destination.clone());
+        let request = TransferRequest { sources, destination };
+        let ops = services.operations;
+        if mode == PasteMode::Move {
+            let title = transfer_title(TransferVerb::Moving, &request.sources, &request.destination);
+            let use_case = ops.move_entries;
+            self.spawn_job(title, affected, move |ctx| async move { use_case.execute(&request, &ctx).await.result });
+        } else {
+            let title = transfer_title(TransferVerb::Copying, &request.sources, &request.destination);
+            let use_case = ops.copy;
+            self.spawn_job(title, affected, move |ctx| async move { use_case.execute(&request, &ctx).await.result });
+        }
+    }
+
+    pub fn prepare_drag(self: Pin<&mut Self>, locations: &QStringList) {
+        let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
+        let items = decode_all(locations);
+        let internal = items.iter().map(StoragePath::encode).collect::<Vec<_>>().join(&LOCATION_SEPARATOR.to_string());
+        let (mounts, local) = (services.mounts.clone(), services.home.mount().clone());
+        self.spawn_task(
+            async move {
+                let mut urls = Vec::new();
+                for item in &items {
+                    if let Some(url) = to_file_url(item, &local) {
+                        urls.push(url);
+                    } else if let Ok(materializer) = mounts.resolve(item.mount()).and_then(|m| m.materializer()) {
+                        // Folders can't be materialised yet; other apps get the files.
+                        if let Ok(file) = materializer.local_file_boxed(item).await {
+                            urls.push(native_file_url(file.path()));
+                        }
+                    }
+                }
+                (urls, internal)
+            },
+            |controller, (urls, internal)| {
+                let urls: QStringList = urls.iter().map(QString::from).collect();
+                controller.drag_ready(urls, QString::from(&internal));
+            },
+        );
     }
 
     pub fn move_to_trash(self: Pin<&mut Self>, locations: &QStringList) {
@@ -676,6 +864,53 @@ fn accounts_of(folders: &[StoragePath]) -> Vec<AccountId> {
     accounts
 }
 
+/// Finder's rule: dragging within one volume moves, across volumes copies.
+fn drop_mode(operation: DropOperation, sources: &[StoragePath], destination: &StoragePath) -> PasteMode {
+    match operation {
+        DropOperation::AlwaysCopy => PasteMode::Copy,
+        DropOperation::AlwaysMove => PasteMode::Move,
+        DropOperation::FollowKeys | DropOperation { .. } => {
+            if sources.iter().all(|source| source.mount() == destination.mount()) {
+                PasteMode::Move
+            } else {
+                PasteMode::Copy
+            }
+        }
+    }
+}
+
+/// Automatic drops follow the modifier keys held at the moment of the drop.
+fn drop_operation_now(requested: DropOperation) -> DropOperation {
+    if requested != DropOperation::FollowKeys {
+        return requested;
+    }
+    match drop_modifier() {
+        DropModifier::ForceCopy => DropOperation::AlwaysCopy,
+        DropModifier::ForceMove => DropOperation::AlwaysMove,
+        DropModifier::None => DropOperation::FollowKeys,
+    }
+}
+
+fn offline_title(location: &StoragePath) -> String {
+    let name = location.name().map_or_else(|| "/".into(), PathSegment::display_name);
+    format!("Making \u{201c}{name}\u{201d} available offline")
+}
+
+/// "Copying “a.mov” to “media”" (plus how many more), for the resume prompt.
+fn interrupted_text(found: &[InterruptedTransfer]) -> String {
+    let Some(first) = found.first() else { return String::new() };
+    let verb = match first.entry.kind {
+        JournaledKind::Copy => TransferVerb::Copying,
+        JournaledKind::Move => TransferVerb::Moving,
+    };
+    let headline = transfer_title(verb, &first.entry.sources, &first.entry.destination);
+    match found.len() {
+        1 => headline,
+        2 => format!("{headline}, and 1 more transfer"),
+        count => format!("{headline}, and {} more transfers", count - 1),
+    }
+}
+
 fn decode_all(locations: &QStringList) -> Vec<StoragePath> {
     QList::<QString>::from(locations).iter().filter_map(|text| StoragePath::decode(&text.to_string()).ok()).collect()
 }
@@ -735,4 +970,20 @@ fn cost_texts(warning: &CostWarning) -> (String, String) {
         format_size(warning.bytes)
     );
     (title, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_move_within_a_mount_and_copy_across() {
+        let folder = StoragePath::parse("file:///Users/me/Desktop").unwrap();
+        let local = vec![StoragePath::parse("file:///Users/me/a.txt").unwrap()];
+        let remote = vec![StoragePath::parse("s3://1@photos/b.jpg").unwrap()];
+        assert!(drop_mode(DropOperation::FollowKeys, &local, &folder) == PasteMode::Move);
+        assert!(drop_mode(DropOperation::FollowKeys, &remote, &folder) == PasteMode::Copy);
+        assert!(drop_mode(DropOperation::AlwaysCopy, &local, &folder) == PasteMode::Copy);
+        assert!(drop_mode(DropOperation::AlwaysMove, &remote, &folder) == PasteMode::Move);
+    }
 }

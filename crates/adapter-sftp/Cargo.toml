@@ -1,0 +1,24 @@
+[package]
+name = "adapter-sftp"
+description = "sftp:// provider over SSH (russh + russh-sftp): host-key trust, agent/key/password sign-in."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time"] }
+russh.workspace = true
+russh-sftp.workspace = true
+
+[dev-dependencies]
+vfs-contract-tests.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

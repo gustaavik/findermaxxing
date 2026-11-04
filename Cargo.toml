@@ -5,12 +5,16 @@ default-members = [
     "crates/domain",
     "crates/application",
     "crates/vfs-contract-tests",
+    "crates/adapter-file-cache",
     "crates/adapter-keyring",
     "crates/adapter-local-fs",
     "crates/adapter-preview",
     "crates/adapter-s3",
+    "crates/adapter-sftp",
+    "crates/adapter-smb",
     "crates/adapter-sqlite-store",
     "crates/adapter-tokio-runtime",
+    "crates/adapter-webdav",
     "crates/arch-tests",
     "xtask",
 ]
@@ -18,12 +22,16 @@ members = [
     "crates/domain",
     "crates/application",
     "crates/vfs-contract-tests",
+    "crates/adapter-file-cache",
     "crates/adapter-keyring",
     "crates/adapter-local-fs",
     "crates/adapter-preview",
     "crates/adapter-s3",
+    "crates/adapter-sftp",
+    "crates/adapter-smb",
     "crates/adapter-sqlite-store",
     "crates/adapter-tokio-runtime",
+    "crates/adapter-webdav",
     "crates/presentation",
     "crates/app",
     "crates/arch-tests",
@@ -47,6 +55,10 @@ adapter-preview = { path = "crates/adapter-preview" }
 adapter-sqlite-store = { path = "crates/adapter-sqlite-store" }
 adapter-s3 = { path = "crates/adapter-s3" }
 adapter-keyring = { path = "crates/adapter-keyring" }
+adapter-file-cache = { path = "crates/adapter-file-cache" }
+adapter-sftp = { path = "crates/adapter-sftp" }
+adapter-smb = { path = "crates/adapter-smb" }
+adapter-webdav = { path = "crates/adapter-webdav" }
 presentation = { path = "crates/presentation" }
 
 thiserror = "2"
@@ -73,6 +85,16 @@ aws-config = { version = "1.13", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.157", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 keyring = "4.2"
 serde_json = "1"
+# No `rsa` feature: the `rsa` crate's private-key operations aren't constant-time
+# (RUSTSEC-2023-0071, no fix). RSA keys still work through ssh-agent, which signs
+# itself; Ed25519/ECDSA keys and host keys are unaffected (ADR 0021).
+russh = { version = "0.65", default-features = false, features = ["aws-lc-rs", "flate2"] }
+russh-sftp = "3.0"
+smb2 = "0.42"
+# rustls with the OS trust store (rustls-platform-verifier); no system proxy lookup.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
+quick-xml = "0.42"
+percent-encoding = "2.3"
 cxx = "1.0.205"
 cxx-qt = "0.10.0"
 cxx-qt-lib = { version = "0.10.0", features = ["qt_gui", "qt_qml", "qt_quickcontrols"] }

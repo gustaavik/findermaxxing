@@ -5,8 +5,10 @@
 //! so the registry can store heterogeneous providers behind `Arc<dyn …>`.
 
 mod accounts;
+mod cache;
 mod clock;
 mod job;
+mod journal;
 mod lister;
 mod mount;
 mod mutation;
@@ -14,14 +16,17 @@ mod places;
 mod preview;
 mod remote_item;
 mod saved_searches;
+mod servers;
 mod stream;
 mod watcher;
 
 pub use accounts::{
     AccountStore, BucketInfo, CredentialError, CredentialKey, CredentialStore, NewS3Account, S3Connector, Secret,
 };
+pub use cache::{AccountMounts, CacheIndex, CacheJanitor, CacheRecord, PinStore, is_pinned};
 pub use clock::Clock;
 pub use job::{ConflictResolver, CostConfirmer, JobObserver};
+pub use journal::{InFlightWrite, InterruptedTransfer, JournalEntry, JournalId, JournaledKind, TransferJournal};
 pub use lister::{DynLister, Lister};
 pub use mount::{MountHandle, MountHandleBuilder, MountResolver, ProviderFactory};
 pub use mutation::{
@@ -35,5 +40,6 @@ pub use preview::{
 };
 pub use remote_item::{ItemProperties, ItemVersion, MetadataEditor, Presigner, PropertyChanges, VersionLister};
 pub use saved_searches::{NewSavedSearch, SavedSearchStore, StoreError};
-pub use stream::{ByteStream, DynReader, DynWriter, Reader, WriteSink, Writer};
+pub use servers::{ConnectError, NewServerAccount, ServerAccountStore, ServerConnector};
+pub use stream::{ByteStream, DynReader, DynWriter, Reader, ResumeState, ResumedSink, WriteSink, Writer, skip_bytes};
 pub use watcher::{DynWatcher, Watcher};

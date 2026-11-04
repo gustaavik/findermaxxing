@@ -2,7 +2,7 @@
 //! need multipart uploads), never overwriting, and nothing visible until commit.
 
 use application::CancelToken;
-use application::ports::{Reader, Writer};
+use application::ports::{Reader, ResumeState, ResumedSink, Writer};
 use domain::{ByteSize, VfsError};
 use futures::TryStreamExt;
 
@@ -111,4 +111,64 @@ where
     fixture.create_dir("folder").await;
     fixture.create_file("folder/inside", b"x").await;
     assert_eq!(read_all(fixture, "folder").await, Err(VfsError::IsADirectory));
+}
+
+/// Expands to the resume contract cases, for writers that can continue a
+/// partial write after a crash or quit (ADR 0019).
+#[macro_export]
+macro_rules! resume_contract_tests {
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$(#[$attr])*];
+            dropped_checkpointed_writes_resume_where_they_stopped,
+            discarded_writes_cannot_resume_and_leave_nothing,
+        );
+    };
+}
+
+/// More than two S3 parts, so a resumed upload has whole parts to keep.
+const RESUME_PAYLOAD: usize = 20 * 1024 * 1024;
+
+async fn checkpointed_partial_write<F: VfsFixture>(fixture: &F, name: &str, payload: &[u8]) -> ResumeState
+where
+    F::Vfs: Writer,
+{
+    let mut sink = fixture.vfs().create(&child(fixture, name), Some(ByteSize(payload.len() as u64))).await.unwrap();
+    for chunk in payload.chunks(WRITE_CHUNK) {
+        sink.write(chunk.to_vec()).await.unwrap();
+    }
+    let state = sink.checkpoint().expect("a resumable writer hands out a state once data was written");
+    drop(sink);
+    state
+}
+
+pub async fn dropped_checkpointed_writes_resume_where_they_stopped<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Reader + Writer,
+{
+    let payload: Vec<u8> = (0..RESUME_PAYLOAD).map(|i| (i % 249) as u8).collect();
+    let written = &payload[..RESUME_PAYLOAD * 3 / 4];
+    let state = checkpointed_partial_write(fixture, "resumed.bin", written).await;
+    assert_eq!(fixture.read_file("resumed.bin").await, None, "a partial write is never visible");
+
+    let ResumedSink { mut sink, offset } = fixture.vfs().resume(&child(fixture, "resumed.bin"), &state).await.unwrap();
+    let offset = usize::try_from(offset.0).unwrap();
+    assert!(offset <= written.len(), "can't have kept more than was written ({offset})");
+    for chunk in payload[offset..].chunks(WRITE_CHUNK) {
+        sink.write(chunk.to_vec()).await.unwrap();
+    }
+    sink.commit().await.unwrap();
+    assert!(read_all(fixture, "resumed.bin").await.unwrap() == payload, "resumed payload must round-trip");
+}
+
+pub async fn discarded_writes_cannot_resume_and_leave_nothing<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Writer,
+{
+    let payload = vec![7_u8; RESUME_PAYLOAD / 2];
+    let state = checkpointed_partial_write(fixture, "discarded.bin", &payload).await;
+    let target = child(fixture, "discarded.bin");
+    fixture.vfs().discard(&target, &state).await.unwrap();
+    fixture.vfs().discard(&target, &state).await.unwrap();
+    assert_eq!(fixture.vfs().resume(&target, &state).await.map(|r| r.offset), Err(VfsError::NotFound));
+    assert_eq!(fixture.read_file("discarded.bin").await, None);
 }

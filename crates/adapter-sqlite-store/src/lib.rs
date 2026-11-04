@@ -1,13 +1,18 @@
 //! SQLite-backed metadata store. Implements `SavedSearchStore`,
-//! `AccountStore` (settings only: secrets live in the OS keychain) and
-//! `FavoritesStore`.
+//! `AccountStore` and `ServerAccountStore` (settings only: secrets live in
+//! the OS keychain), `FavoritesStore`, `PinStore`, `CacheIndex` and
+//! `TransferJournal`.
 //!
 //! The schema is versioned with `PRAGMA user_version`; each entry of
 //! [`MIGRATIONS`] runs exactly once, in order, inside a transaction.
 
 mod accounts;
+mod cache;
 mod favorites;
+mod journal;
+mod location_codec;
 mod query_format;
+mod servers;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -58,6 +63,34 @@ const MIGRATIONS: &[&str] = &[
         skip_cost_warnings, extra_buckets FROM s3_accounts;
     DROP TABLE s3_accounts;
     ALTER TABLE s3_accounts_v2 RENAME TO s3_accounts;",
+    "CREATE TABLE server_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        protocol TEXT NOT NULL,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER,
+        transport TEXT NOT NULL,
+        username TEXT NOT NULL,
+        root TEXT NOT NULL,
+        auth_kind TEXT NOT NULL,
+        auth_value TEXT
+    );",
+    "CREATE TABLE pins (location TEXT PRIMARY KEY);
+    CREATE TABLE cache_entries (
+        location TEXT PRIMARY KEY,
+        file TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        remote_modified INTEGER,
+        last_used INTEGER NOT NULL
+    );
+    CREATE TABLE cache_listings (folder TEXT PRIMARY KEY, entries TEXT NOT NULL);",
+    "CREATE TABLE transfer_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        sources TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        in_flight TEXT
+    );",
 ];
 
 /// One connection, serialised by a mutex: metadata writes are rare and tiny.

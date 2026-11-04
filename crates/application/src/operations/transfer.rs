@@ -4,7 +4,8 @@
 //!
 //! Strategy per file: a same-provider copy uses the provider's `Copier`
 //! (APFS clone, S3 server-side copy) and falls back to streaming when it
-//! can't; cross-provider copies always stream `Reader` → `Writer`.
+//! can't; cross-provider copies always stream `Reader` → `Writer`. Large
+//! streamed writes are journaled so an interrupted job can resume (ADR 0019).
 
 use std::sync::Arc;
 
@@ -18,9 +19,10 @@ use futures::StreamExt;
 use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
 use super::progress::ProgressTracker;
+use super::resume::{Existing, Previous, RESUMABLE_SIZE, Resumption, finished_earlier};
 use super::scan::{ScannedTree, scan};
 use crate::cancel::CancelToken;
-use crate::ports::{MountHandle, MountResolver};
+use crate::ports::{InFlightWrite, MountHandle, MountResolver, WriteSink};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferMode {
@@ -36,8 +38,9 @@ pub(crate) async fn run(
     destination: &StoragePath,
     policy: CostPolicy,
     ctx: &JobContext,
+    resumption: &Resumption,
 ) -> OperationReport {
-    let mut transfer = match Transfer::new(mounts, mode, destination, policy, ctx) {
+    let mut transfer = match Transfer::new(mounts, mode, destination, policy, ctx, resumption) {
         Ok(transfer) => transfer,
         Err(error) => return OperationReport::new(Operation::sequence(Vec::new()), Err(error)),
     };
@@ -77,6 +80,7 @@ struct Transfer<'a> {
     destination: &'a StoragePath,
     policy: CostPolicy,
     ctx: &'a JobContext,
+    resumption: &'a Resumption,
     tracker: Arc<ProgressTracker>,
     memory: ConflictMemory,
     replaced: Vec<TrashTicket>,
@@ -91,6 +95,7 @@ impl<'a> Transfer<'a> {
         destination: &'a StoragePath,
         policy: CostPolicy,
         ctx: &'a JobContext,
+        resumption: &'a Resumption,
     ) -> Result<Self, OperationError> {
         let dest = mounts.resolve(destination.mount()).map_err(OperationError::on(destination))?;
         Ok(Self {
@@ -100,6 +105,7 @@ impl<'a> Transfer<'a> {
             destination,
             policy,
             ctx,
+            resumption,
             tracker: ProgressTracker::new(Arc::clone(&ctx.observer)),
             memory: ConflictMemory::default(),
             replaced: Vec::new(),
@@ -138,7 +144,11 @@ impl<'a> Transfer<'a> {
             let on_source = OperationError::on(source);
             let handle = self.mounts.resolve(source.mount()).map_err(OperationError::on(source))?;
             let lister = handle.lister().map_err(OperationError::on(source))?;
-            let entry = lister.stat_boxed(source).await.map_err(on_source)?;
+            let entry = match lister.stat_boxed(source).await {
+                // Continuing a move: the earlier run already moved this one.
+                Err(VfsError::NotFound) if self.resumption.existing == Existing::EarlierRun => continue,
+                other => other.map_err(on_source)?,
+            };
             if entry.kind() == EntryKind::Directory && self.destination.is_within(source) {
                 return Err(OperationError::IntoItself { item: source.clone() });
             }
@@ -185,6 +195,12 @@ impl<'a> Transfer<'a> {
         }
         match self.existing(&candidate).await? {
             None => Ok(Placement::At(candidate)),
+            Some(existing)
+                if self.resumption.existing == Existing::EarlierRun && finished_earlier(entry, &existing) =>
+            {
+                // Folders are merged into; a complete file is done.
+                Ok(if entry.kind() == EntryKind::Directory { Placement::At(candidate) } else { Placement::Skip })
+            }
             Some(existing) => self.resolve_conflict(entry, existing).await,
         }
     }
@@ -250,7 +266,8 @@ impl<'a> Transfer<'a> {
 
     async fn transfer_one(&mut self, item: Prepared, target: StoragePath) -> Result<(), OperationError> {
         let relocation = Relocation { from: item.entry.path().clone(), to: target.clone() };
-        let route = Route { source: &item.source, dest: &self.dest, same_mount: item.same_mount };
+        let route =
+            Route { source: &item.source, dest: &self.dest, same_mount: item.same_mount, resume: self.resumption };
         let cancel = &self.ctx.cancel;
         let result = match (self.mode, &item.tree) {
             (TransferMode::Copy, Some(tree)) => {
@@ -271,11 +288,14 @@ impl<'a> Transfer<'a> {
     }
 }
 
+static NO_RESUMPTION: Resumption = Resumption::none();
+
 /// Where bytes come from and go to.
 pub(crate) struct Route<'a> {
     pub source: &'a MountHandle,
     pub dest: &'a MountHandle,
     pub same_mount: bool,
+    pub resume: &'a Resumption,
 }
 
 pub(crate) struct TreeFailure {
@@ -297,7 +317,10 @@ pub(crate) async fn copy_tree(
         let fail = |error: VfsError| TreeFailure { root_created, error: OperationError::on(item.path())(error) };
         let destination = item.path().rebase(tree.root.path(), target).ok_or_else(|| fail(VfsError::NotFound))?;
         tracker.item_started(item.name().into());
-        let result = if item.kind() == EntryKind::Directory {
+        let result = if route.resume.existing == Existing::EarlierRun && done_earlier(route, item, &destination).await {
+            tracker.byte_callback()(item.metadata().size.unwrap_or_default());
+            Ok(())
+        } else if item.kind() == EntryKind::Directory {
             match route.dest.folder_maker() {
                 Ok(maker) => maker.create_folder_boxed(&destination).await.map(drop),
                 Err(error) => Err(error),
@@ -310,6 +333,11 @@ pub(crate) async fn copy_tree(
         tracker.item_finished();
     }
     Ok(())
+}
+
+async fn done_earlier(route: &Route<'_>, item: &FileEntry, destination: &StoragePath) -> bool {
+    let Ok(lister) = route.dest.lister() else { return false };
+    lister.stat_boxed(destination).await.is_ok_and(|existing| finished_earlier(item, &existing))
 }
 
 async fn copy_file(
@@ -332,7 +360,8 @@ async fn copy_file(
 }
 
 /// Reader → Writer, chunk by chunk. Aborts the write on any error so the
-/// destination never holds a partial file.
+/// destination never holds a partial file, unless the write was journaled
+/// for resuming and the job is merely interrupted (dropped).
 async fn stream_file(
     route: &Route<'_>,
     item: &FileEntry,
@@ -341,29 +370,119 @@ async fn stream_file(
     cancel: &CancelToken,
 ) -> Result<(), VfsError> {
     let reader = route.source.reader()?;
-    let writer = route.dest.writer()?;
-    let mut chunks = reader.read_boxed(item.path(), cancel.clone()).await?;
-    let mut sink = writer.create_boxed(destination, item.metadata().size).await?;
     let report = tracker.byte_callback();
-    while let Some(chunk) = chunks.next().await {
-        let written = match chunk {
-            Ok(_) if cancel.is_cancelled() => Err(VfsError::Cancelled),
-            Ok(chunk) => {
-                let length = ByteSize(chunk.len() as u64);
-                sink.write(chunk).await.map(|()| report(length))
-            }
-            Err(error) => Err(error),
-        };
-        if let Err(error) = written {
+    let (mut sink, offset) = open_sink(route, item, destination).await?;
+    let opened = if offset.0 > 0 {
+        reader.read_from_boxed(item.path(), offset, cancel.clone()).await
+    } else {
+        reader.read_boxed(item.path(), cancel.clone()).await
+    };
+    let mut chunks = match opened {
+        Ok(chunks) => chunks,
+        Err(error) => {
             sink.abort().await;
             return Err(error);
         }
+    };
+    report(offset);
+    let mut journal = Checkpoint::new(route, item, destination, offset.0 > 0);
+    let result = match pump(route, &mut chunks, &mut *sink, &mut journal, &report, cancel).await {
+        Ok(()) => sink.commit().await,
+        Err(error) => {
+            sink.abort().await;
+            Err(error)
+        }
+    };
+    journal.finish(route).await;
+    result
+}
+
+/// Moves every chunk from `chunks` into `sink`, journaling it once it can
+/// be resumed. The caller commits or aborts.
+async fn pump(
+    route: &Route<'_>,
+    chunks: &mut crate::ports::ByteStream,
+    sink: &mut dyn WriteSink,
+    journal: &mut Checkpoint,
+    report: &crate::ports::ProgressCallback,
+    cancel: &CancelToken,
+) -> Result<(), VfsError> {
+    while let Some(chunk) = chunks.next().await {
+        if cancel.is_cancelled() {
+            return Err(VfsError::Cancelled);
+        }
+        let chunk = chunk?;
+        let length = ByteSize(chunk.len() as u64);
+        sink.write(chunk).await?;
+        report(length);
+        journal.record(route, sink).await;
     }
-    if cancel.is_cancelled() {
-        sink.abort().await;
-        return Err(VfsError::Cancelled);
+    if cancel.is_cancelled() { Err(VfsError::Cancelled) } else { Ok(()) }
+}
+
+/// A new sink, or the interrupted run's partial write continued.
+async fn open_sink(
+    route: &Route<'_>,
+    item: &FileEntry,
+    destination: &StoragePath,
+) -> Result<(Box<dyn WriteSink>, ByteSize), VfsError> {
+    let writer = route.dest.writer()?;
+    match route.resume.take_previous(item, destination) {
+        Some(Previous::Continue(state)) => match writer.resume_boxed(destination, &state).await {
+            Ok(resumed) => return Ok((resumed.sink, resumed.offset)),
+            Err(_) => {
+                let _ = writer.discard_boxed(destination, &state).await;
+            }
+        },
+        Some(Previous::Stale(state)) => {
+            let _ = writer.discard_boxed(destination, &state).await;
+        }
+        None => {}
     }
-    sink.commit().await
+    let sink = writer.create_boxed(destination, item.metadata().size).await?;
+    Ok((sink, ByteSize(0)))
+}
+
+/// Journals a large write once its sink can describe how to continue it.
+struct Checkpoint {
+    pending: Option<InFlightWrite>,
+    recorded: bool,
+}
+
+impl Checkpoint {
+    fn new(route: &Route<'_>, item: &FileEntry, destination: &StoragePath, resumed: bool) -> Self {
+        let large = item.metadata().size.is_some_and(|size| size >= RESUMABLE_SIZE);
+        let pending = (route.resume.is_journaled() && large).then(|| InFlightWrite {
+            source: item.path().clone(),
+            target: destination.clone(),
+            source_size: item.metadata().size.unwrap_or_default(),
+            source_modified: item.metadata().modified,
+            state: crate::ports::ResumeState(String::new()),
+        });
+        // A resumed write keeps its journal row until it finishes.
+        Self { pending, recorded: resumed }
+    }
+
+    async fn record(&mut self, route: &Route<'_>, sink: &mut dyn WriteSink) {
+        if self.recorded {
+            return;
+        }
+        let Some(mut write) = self.pending.take() else { return };
+        match sink.checkpoint() {
+            Some(state) => {
+                write.state = state;
+                route.resume.write_started(write).await;
+                self.recorded = true;
+            }
+            None => self.pending = Some(write),
+        }
+    }
+
+    async fn finish(&self, route: &Route<'_>) {
+        if self.recorded {
+            route.resume.write_finished().await;
+        }
+    }
 }
 
 /// Renames when the provider can; otherwise copies and then deletes the source.
@@ -386,7 +505,7 @@ pub(crate) async fn move_item(
             let tree = scan(&*lister, entry.clone(), cancel).await.map_err(OperationError::on(entry.path()))?;
             // The root item was already counted as one item when the move started.
             tracker.add_totals(tree.item_count().saturating_sub(1), tree.bytes);
-            let route = Route { source: handle, dest: handle, same_mount: true };
+            let route = Route { source: handle, dest: handle, same_mount: true, resume: &NO_RESUMPTION };
             move_across(&route, entry, &tree, target, tracker, cancel).await
         }
         Err(error) => Err(OperationError::on(entry.path())(error)),

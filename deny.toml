@@ -37,6 +37,10 @@ allow = [
     "CC0-1.0",
     "Unicode-3.0",
     "MPL-2.0",
+    # Mozilla's CA root certificates as data (webpki-root-certs, via reqwest's
+    # rustls-platform-verifier). A permissive data license; the text ships in
+    # the third-party license report.
+    "CDLA-Permissive-2.0",
 ]
 
 [licenses.private]

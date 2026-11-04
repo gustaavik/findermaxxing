@@ -3,17 +3,20 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import FinderMaxxing
 
-// Favourites, places, volumes and cloud accounts in one list. Opening and
-// managing entries goes through SidebarController; this file only lays out.
+// Favourites, places, volumes, cloud accounts and servers in one list.
+// Opening and managing entries goes through SidebarController; this file only
+// lays out. Folders in the list accept drops like a folder view does.
 Pane {
     id: sidebar
 
     required property SidebarController controller
+    required property OperationsController operations
 
     readonly property int rowHeight: 26
     readonly property int indent: 12
     // Plain glyphs until native icons arrive with icon themes.
-    readonly property var glyphs: ({ home: "⌂", folder: "▤", drive: "▭", cloud: "☁", bucket: "◫" })
+    readonly property var glyphs: ({ home: "⌂", folder: "▤", drive: "▭", cloud: "☁", bucket: "◫", server: "⇄" })
+    readonly property string locationsMime: "application/x-findermaxxing-locations"
 
     signal openRequested(string location)
 
@@ -45,13 +48,27 @@ Pane {
 
                 readonly property bool isHeading: kind === SidebarController.Heading
                 readonly property bool isAccount: kind === SidebarController.Account
+                readonly property bool isServer: kind === SidebarController.Server
                 readonly property bool openable: location !== ""
 
                 width: ListView.view.width
                 height: isHeading ? sidebar.rowHeight * 1.2 : (detail !== "" ? sidebar.rowHeight * 1.6 : sidebar.rowHeight)
                 enabled: !isHeading
                 leftPadding: isHeading || isAccount ? sidebar.indent : sidebar.indent * 2
+                highlighted: dropTarget.containsDrag
                 Accessible.name: detail !== "" ? label + ", " + detail : label
+
+                DropArea {
+                    id: dropTarget
+                    anchors.fill: parent
+                    enabled: entry.openable
+                    onDropped: drop => {
+                        sidebar.operations.dropItems(drop.urls.map(url => url.toString()),
+                                                     drop.getDataAsString(sidebar.locationsMime) ?? "",
+                                                     entry.location, OperationsController.FollowKeys)
+                        drop.accept()
+                    }
+                }
 
                 contentItem: RowLayout {
                     spacing: 6
@@ -87,7 +104,7 @@ Pane {
                 TapHandler {
                     acceptedButtons: Qt.RightButton
                     onTapped: {
-                        if (entry.kind === SidebarController.Favorite || entry.isAccount) {
+                        if (entry.kind === SidebarController.Favorite || entry.isAccount || entry.isServer) {
                             itemMenu.target = entry
                             itemMenu.popup()
                         }
@@ -98,9 +115,17 @@ Pane {
 
         Button {
             Layout.fillWidth: true
-            Layout.margins: 8
+            Layout.leftMargin: 8
+            Layout.rightMargin: 8
+            Layout.topMargin: 8
             text: qsTr("Add Cloud Storage…")
             onClicked: addAccount.open()
+        }
+        Button {
+            Layout.fillWidth: true
+            Layout.margins: 8
+            text: qsTr("Connect to Server…")
+            onClicked: connectServer.open()
         }
     }
 
@@ -124,6 +149,22 @@ Pane {
             onTriggered: {
                 addBucket.accountId = itemMenu.target.accountId
                 addBucket.open()
+            }
+        }
+        MenuItem {
+            visible: itemMenu.target !== null && itemMenu.target.isServer
+            height: visible ? implicitHeight : 0
+            text: qsTr("Reconnect")
+            onTriggered: sidebar.controller.reconnectServer(itemMenu.target.accountId)
+        }
+        MenuItem {
+            visible: itemMenu.target !== null && itemMenu.target.isServer
+            height: visible ? implicitHeight : 0
+            text: qsTr("Remove Server…")
+            onTriggered: {
+                removeServer.accountId = itemMenu.target.accountId
+                removeServer.serverName = itemMenu.target.label
+                removeServer.open()
             }
         }
         MenuItem {
@@ -184,8 +225,72 @@ Pane {
         }
     }
 
+    Dialog {
+        id: removeServer
+
+        property var accountId: 0
+        property string serverName: ""
+
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        modal: true
+        title: qsTr("Remove “%1”?").arg(serverName)
+        standardButtons: Dialog.Cancel | Dialog.Ok
+        onAccepted: sidebar.controller.removeServer(accountId)
+
+        Label {
+            text: qsTr("The server and its saved password are removed from this computer.\nNothing on the server is deleted.")
+        }
+    }
+
+    // First contact with an SSH server: the user checks its fingerprint
+    // (e.g. against `ssh-keygen -lf` on the server) before trusting it.
+    Dialog {
+        id: hostKey
+
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(480, parent.width - 32)
+        modal: true
+        visible: sidebar.controller.hostKeyPrompt !== ""
+        closePolicy: Popup.NoAutoClose
+        title: qsTr("Trust this server?")
+
+        ColumnLayout {
+            anchors.fill: parent
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: qsTr("FinderMaxxing hasn't connected to this server before. Make sure this is its key before you trust it; if it isn't, someone may be intercepting the connection.")
+            }
+            TextArea {
+                Layout.fillWidth: true
+                readOnly: true
+                text: sidebar.controller.hostKeyPrompt
+                Accessible.name: qsTr("Server key fingerprint")
+            }
+        }
+
+        footer: DialogButtonBox {
+            Button {
+                text: qsTr("Cancel")
+                onClicked: sidebar.controller.answerHostKey(false)
+            }
+            Button {
+                text: qsTr("Trust and Connect")
+                highlighted: true
+                onClicked: sidebar.controller.answerHostKey(true)
+            }
+        }
+    }
+
     AddAccountDialog {
         id: addAccount
+        controller: sidebar.controller
+    }
+
+    ConnectServerDialog {
+        id: connectServer
         controller: sidebar.controller
     }
 

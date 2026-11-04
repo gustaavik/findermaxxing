@@ -57,10 +57,17 @@ pub struct CredentialKey {
 
 impl CredentialKey {
     const S3_SERVICE: &'static str = "FinderMaxxing S3";
+    const SERVER_SERVICE: &'static str = "FinderMaxxing Servers";
 
     #[must_use]
     pub fn s3_secret(id: AccountId) -> Self {
         Self { service: Self::S3_SERVICE.to_owned(), account: id.to_string() }
+    }
+
+    /// The password or key passphrase of a file-server account.
+    #[must_use]
+    pub fn server_secret(id: AccountId) -> Self {
+        Self { service: Self::SERVER_SERVICE.to_owned(), account: id.to_string() }
     }
 }
 

@@ -65,6 +65,7 @@ public:
     Q_INVOKABLE QStringList selectedLocations() const;
     Q_INVOKABLE QString locationAt(int row) const;
     Q_INVOKABLE QString nameAt(int row) const;
+    Q_INVOKABLE bool isContainerAt(int row) const;
     Q_INVOKABLE int rowOfLocation(const QString& location) const;
 
 Q_SIGNALS:

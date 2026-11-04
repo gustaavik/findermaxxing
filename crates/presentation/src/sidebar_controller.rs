@@ -1,16 +1,23 @@
-//! `SidebarController`: favourites, standard places, volumes, and every S3
-//! account with its buckets: local and remote storage side by side. Also
-//! adds and removes accounts and favourites.
+//! `SidebarController`: favourites, standard places, volumes, every S3
+//! account with its buckets, and file servers (SFTP, WebDAV, SMB): local and
+//! remote storage side by side. Also adds and removes accounts, servers and
+//! favourites, including confirming a new SSH server's identity.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use application::ports::{BucketInfo, NewS3Account, Secret, Volume};
-use application::use_cases::AccountError;
+use application::ports::{AccountMounts, BucketInfo, ConnectError, NewS3Account, NewServerAccount, Secret, Volume};
+use application::use_cases::{AccountError, ServerError};
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
-use domain::{AccountId, Addressing, BucketName, PathSegment, S3Account, S3Auth, S3Location, StoragePath};
+use domain::{
+    AccountId, Addressing, BucketName, HostKey, HostTrust, PathSegment, S3Account, S3Auth, S3Location, ServerAccount,
+    ServerAuth, ServerLocation, ServerProtocol, StoragePath, Transport,
+};
+use futures::future::join_all;
+
+use crate::error_messages::server_message;
 
 use crate::rows_bridge::SidebarRow;
 use crate::services::AppServices;
@@ -52,6 +59,28 @@ pub mod qobject {
         Favorite,
         Account,
         Bucket,
+        Server,
+    }
+
+    #[qenum(SidebarController)]
+    enum ServerKind {
+        Sftp,
+        WebDav,
+        Smb,
+    }
+
+    #[qenum(SidebarController)]
+    enum SignIn {
+        Password,
+        Agent,
+        KeyFile,
+        Guest,
+    }
+
+    #[qenum(SidebarController)]
+    enum Security {
+        Encrypted,
+        Unencrypted,
     }
 
     #[qenum(SidebarController)]
@@ -75,6 +104,10 @@ pub mod qobject {
         #[qproperty(*mut SidebarModel, model)]
         #[qproperty(bool, adding_account)]
         #[qproperty(QString, account_error)]
+        #[qproperty(bool, adding_server)]
+        #[qproperty(QString, server_error)]
+        /// Set while a new SSH server's key waits for the user: algorithm and fingerprint.
+        #[qproperty(QString, host_key_prompt)]
         type SidebarController = super::SidebarControllerRust;
     }
 
@@ -95,19 +128,39 @@ pub mod qobject {
         #[qinvokable]
         fn add_bucket(self: Pin<&mut SidebarController>, account_id: i64, bucket: &QString);
 
+        /// `fields` = name, host, port, user name, folder (or share/folder), password or passphrase, key file.
+        #[qinvokable]
+        fn add_server(
+            self: Pin<&mut SidebarController>,
+            fields: &QStringList,
+            kind: ServerKind,
+            sign_in: SignIn,
+            security: Security,
+        );
+        /// The answer to `host_key_prompt`: trust it (and connect) or give up.
+        #[qinvokable]
+        fn answer_host_key(self: Pin<&mut SidebarController>, trust: bool);
+        #[qinvokable]
+        fn remove_server(self: Pin<&mut SidebarController>, account_id: i64);
+        #[qinvokable]
+        fn reconnect_server(self: Pin<&mut SidebarController>, account_id: i64);
+
         #[qsignal]
         fn account_added(self: Pin<&mut SidebarController>);
+        #[qsignal]
+        fn server_added(self: Pin<&mut SidebarController>);
     }
 
     impl cxx_qt::Threading for SidebarController {}
     impl cxx_qt::Initialize for SidebarController {}
 }
 
-use qobject::{AuthMode, RowKind, ServicesHolder, SidebarModel, UrlStyle};
+use qobject::{AuthMode, RowKind, Security, ServerKind, ServicesHolder, SidebarModel, SignIn, UrlStyle};
 
 const FAVORITES_HEADING: &str = "Favorites";
 const LOCATIONS_HEADING: &str = "Locations";
 const CLOUD_HEADING: &str = "Cloud Storage";
+const SERVERS_HEADING: &str = "Servers";
 const HOME_LABEL: &str = "Home";
 const COMPUTER_LABEL: &str = "Computer";
 /// Folders every desktop has below home, in sidebar order.
@@ -126,6 +179,19 @@ pub struct SidebarControllerRust {
     connected: bool,
     /// Why an account failed to connect at start-up, shown under its name.
     connect_errors: HashMap<AccountId, String>,
+    adding_server: bool,
+    server_error: QString,
+    host_key_prompt: QString,
+    /// Why a server failed to connect, shown under its name.
+    server_errors: HashMap<AccountId, String>,
+    /// A server waiting for its host key to be confirmed.
+    pending_server: Option<PendingServer>,
+}
+
+struct PendingServer {
+    account: NewServerAccount,
+    secret: Option<Secret>,
+    key: HostKey,
 }
 
 impl Default for SidebarControllerRust {
@@ -138,6 +204,11 @@ impl Default for SidebarControllerRust {
             owned_model: cxx::UniquePtr::null(),
             connected: false,
             connect_errors: HashMap::new(),
+            adding_server: false,
+            server_error: QString::default(),
+            host_key_prompt: QString::default(),
+            server_errors: HashMap::new(),
+            pending_server: None,
         }
     }
 }
@@ -158,6 +229,7 @@ pub(crate) struct SidebarData {
     pub favorites: Vec<StoragePath>,
     pub volumes: Vec<Volume>,
     pub accounts: Vec<(S3Account, Result<Vec<BucketInfo>, String>)>,
+    pub servers: Vec<ServerAccount>,
 }
 
 impl qobject::SidebarController {
@@ -170,13 +242,23 @@ impl qobject::SidebarController {
             // Local places first: a slow or keychain-prompting account must
             // never keep Home and Favorites out of the sidebar.
             let mut data = gather_places(&services).await;
+            data.servers = services.servers.list.execute().await.unwrap_or_default();
             let local = SidebarData { accounts: Vec::new(), ..data.clone() };
             let _ = thread.queue(move |controller| controller.publish(&local));
-            let errors = if connect_first { connect_saved(&services).await } else { None };
+            let (errors, server_errors) = if connect_first {
+                let (accounts, servers) =
+                    futures::join!(connect_saved(&services), connect_servers(&services, &data.servers));
+                (accounts, Some(servers))
+            } else {
+                (None, None)
+            };
             data.accounts = gather_accounts(&services).await;
             let _ = thread.queue(move |mut controller| {
                 if let Some(errors) = errors {
                     controller.as_mut().rust_mut().connect_errors = errors;
+                }
+                if let Some(errors) = server_errors {
+                    controller.as_mut().rust_mut().server_errors = errors;
                 }
                 controller.publish(&data);
             });
@@ -240,8 +322,13 @@ impl qobject::SidebarController {
 
     pub fn remove_account(self: Pin<&mut Self>, account_id: i64) {
         let Some(services) = self.app_services() else { return };
-        let use_case = services.accounts.remove;
-        self.run_then_refresh(async move { use_case.execute(AccountId(account_id)).await.map_err(|e| e.to_string()) });
+        let (use_case, forget) = (services.accounts.remove, services.offline.forget_account);
+        self.run_then_refresh(async move {
+            use_case.execute(AccountId(account_id)).await.map_err(|e| e.to_string())?;
+            // The account is gone either way; leftovers are evicted later.
+            let _ = forget.execute(AccountMounts::S3(AccountId(account_id))).await;
+            Ok(())
+        });
     }
 
     pub fn add_bucket(self: Pin<&mut Self>, account_id: i64, bucket: &QString) {
@@ -252,6 +339,122 @@ impl qobject::SidebarController {
         let use_case = services.accounts.add_bucket;
         self.run_then_refresh(async move {
             use_case.execute(AccountId(account_id), bucket).await.map_err(|e| e.to_string())
+        });
+    }
+
+    pub fn add_server(
+        mut self: Pin<&mut Self>,
+        fields: &QStringList,
+        kind: ServerKind,
+        sign_in: SignIn,
+        security: Security,
+    ) {
+        let form = ServerForm::from(fields);
+        let protocol = match kind {
+            ServerKind::WebDav => ServerProtocol::WebDav,
+            ServerKind::Smb => ServerProtocol::Smb,
+            ServerKind::Sftp | ServerKind { .. } => ServerProtocol::Sftp,
+        };
+        let auth = match sign_in {
+            SignIn::Agent => ServerAuth::Agent,
+            SignIn::KeyFile => ServerAuth::KeyFile { path: form.key_file.trim().to_owned() },
+            SignIn::Guest => ServerAuth::Anonymous,
+            SignIn::Password | SignIn { .. } => ServerAuth::Password,
+        };
+        let Ok(port) = form
+            .port
+            .trim()
+            .parse::<u16>()
+            .map(Some)
+            .or_else(|_| if form.port.trim().is_empty() { Ok(None) } else { Err(()) })
+        else {
+            return self.set_server_error(QString::from(INVALID_PORT_MESSAGE));
+        };
+        let name = non_empty(&form.name).unwrap_or_else(|| form.host.trim().to_owned());
+        let account = NewServerAccount {
+            protocol,
+            name,
+            host: form.host.trim().to_owned(),
+            port,
+            transport: match security {
+                Security::Unencrypted => Transport::Plain,
+                Security::Encrypted | Security { .. } => Transport::Tls,
+            },
+            username: form.username.trim().to_owned(),
+            root: form.folder.trim().trim_matches('/').to_owned(),
+            auth,
+        };
+        let secret = (!form.secret.is_empty()).then(|| Secret::new(form.secret));
+        self.as_mut().set_server_error(QString::default());
+        self.start_adding_server(account, secret, HostTrust::KnownOnly);
+    }
+
+    fn start_adding_server(
+        mut self: Pin<&mut Self>,
+        account: NewServerAccount,
+        secret: Option<Secret>,
+        trust: HostTrust,
+    ) {
+        let Some(services) = self.app_services() else { return };
+        self.as_mut().set_adding_server(true);
+        let (use_case, thread) = (services.servers.add.clone(), self.qt_thread());
+        services.runtime.spawn(async move {
+            let added = use_case.execute(account.clone(), secret.clone(), trust).await;
+            let _ = thread.queue(move |mut controller| {
+                controller.as_mut().set_adding_server(false);
+                match added {
+                    Ok(_) => {
+                        controller.as_mut().server_added();
+                        controller.refresh();
+                    }
+                    Err(ServerError::Connect(ConnectError::UnknownHost(key))) => {
+                        let prompt = format!("{}\n{}", key.algorithm, key.fingerprint);
+                        controller.as_mut().rust_mut().pending_server = Some(PendingServer { account, secret, key });
+                        controller.set_host_key_prompt(QString::from(&prompt));
+                    }
+                    Err(error) => controller.set_server_error(QString::from(&server_message(&error))),
+                }
+            });
+        });
+    }
+
+    pub fn answer_host_key(mut self: Pin<&mut Self>, trust: bool) {
+        self.as_mut().set_host_key_prompt(QString::default());
+        let Some(pending) = self.as_mut().rust_mut().pending_server.take() else { return };
+        if trust {
+            self.start_adding_server(pending.account, pending.secret, HostTrust::Accept(pending.key));
+        }
+    }
+
+    pub fn remove_server(self: Pin<&mut Self>, account_id: i64) {
+        let Some(services) = self.app_services() else { return };
+        let (list, remove, forget) = (services.servers.list, services.servers.remove, services.offline.forget_account);
+        self.run_then_refresh(async move {
+            let servers = list.execute().await.map_err(|e| e.to_string())?;
+            let Some(server) = servers.into_iter().find(|s| s.id == AccountId(account_id)) else { return Ok(()) };
+            remove.execute(&server).await.map_err(|e| server_message(&e))?;
+            let location = ServerLocation { protocol: server.protocol, account: server.id };
+            // The server is gone either way; leftovers are evicted later.
+            let _ = forget.execute(AccountMounts::Server(location)).await;
+            Ok(())
+        });
+    }
+
+    pub fn reconnect_server(self: Pin<&mut Self>, account_id: i64) {
+        let Some(services) = self.app_services() else { return };
+        let (thread, runtime) = (self.qt_thread(), services.runtime.clone());
+        runtime.spawn(async move {
+            let servers = services.servers.list.execute().await.unwrap_or_default();
+            let wanted: Vec<ServerAccount> = servers.into_iter().filter(|s| s.id == AccountId(account_id)).collect();
+            let errors = connect_servers(&services, &wanted).await;
+            let _ = thread.queue(move |mut controller| {
+                let id = AccountId(account_id);
+                match errors.get(&id) {
+                    Some(error) => controller.as_mut().rust_mut().server_errors.insert(id, error.clone()),
+                    None => controller.as_mut().rust_mut().server_errors.remove(&id),
+                };
+                controller.refresh();
+            });
         });
     }
 
@@ -277,8 +480,13 @@ impl qobject::SidebarController {
 
     fn publish(mut self: Pin<&mut Self>, data: &SidebarData) {
         let mut rows = sidebar_rows(data);
-        for row in rows.iter_mut().filter(|r| r.kind == RowKind::Account.repr) {
-            if let Some(error) = self.connect_errors.get(&AccountId(row.account_id)) {
+        for row in rows.iter_mut() {
+            let errors = match row.kind {
+                kind if kind == RowKind::Account.repr => &self.connect_errors,
+                kind if kind == RowKind::Server.repr => &self.server_errors,
+                _ => continue,
+            };
+            if let Some(error) = errors.get(&AccountId(row.account_id)) {
                 row.detail.clone_from(error);
             }
         }
@@ -298,10 +506,20 @@ async fn connect_saved(services: &AppServices) -> Option<HashMap<AccountId, Stri
     )
 }
 
+/// Connects every server at once, so one unreachable host doesn't delay
+/// the rest. Returns why each failing one failed.
+async fn connect_servers(services: &AppServices, servers: &[ServerAccount]) -> HashMap<AccountId, String> {
+    let attempts = servers.iter().map(|server| async {
+        let result = services.servers.connect.execute(server).await;
+        (server.id, result.err().map(|error| server_message(&error)))
+    });
+    join_all(attempts).await.into_iter().filter_map(|(id, error)| Some((id, error?))).collect()
+}
+
 async fn gather_places(services: &AppServices) -> SidebarData {
     let favorites = services.places.favorites.execute().await.unwrap_or_default();
     let volumes = services.places.volumes.execute().await;
-    SidebarData { home: services.home.clone(), favorites, volumes, accounts: Vec::new() }
+    SidebarData { home: services.home.clone(), favorites, volumes, accounts: Vec::new(), servers: Vec::new() }
 }
 
 async fn gather_accounts(services: &AppServices) -> Vec<(S3Account, Result<Vec<BucketInfo>, String>)> {
@@ -329,6 +547,35 @@ impl From<&QStringList> for AccountForm {
         Self { name: next(), endpoint: next(), region: next(), identity: next(), secret: next() }
     }
 }
+
+/// The Connect to Server form, in the order QML sends its fields.
+struct ServerForm {
+    name: String,
+    host: String,
+    port: String,
+    username: String,
+    folder: String,
+    secret: String,
+    key_file: String,
+}
+
+impl From<&QStringList> for ServerForm {
+    fn from(fields: &QStringList) -> Self {
+        let mut values = QList::<QString>::from(fields).iter().map(ToString::to_string).collect::<Vec<_>>().into_iter();
+        let mut next = || values.next().unwrap_or_default();
+        Self {
+            name: next(),
+            host: next(),
+            port: next(),
+            username: next(),
+            folder: next(),
+            secret: next(),
+            key_file: next(),
+        }
+    }
+}
+
+const INVALID_PORT_MESSAGE: &str = "The port is a number from 1 to 65535.";
 
 fn non_empty(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -379,6 +626,15 @@ pub(crate) fn sidebar_rows(data: &SidebarData) -> Vec<SidebarRow> {
     }
     for (account, buckets) in &data.accounts {
         rows.extend(account_rows(account, buckets));
+    }
+    if !data.servers.is_empty() {
+        rows.push(row(RowKind::Heading, SERVERS_HEADING, None, ""));
+    }
+    for server in &data.servers {
+        let Ok(mount) = server.mount() else { continue };
+        let mut line = row(RowKind::Server, &server.name, Some(&StoragePath::root(mount)), "server");
+        line.account_id = server.id.0;
+        rows.push(line);
     }
     rows
 }
@@ -431,6 +687,17 @@ mod tests {
                 (account(1, "AWS"), Ok(vec![BucketInfo { name: BucketName::new("photos").unwrap(), region: None }])),
                 (account(2, "Offline"), Err("timed out".into())),
             ],
+            servers: vec![ServerAccount {
+                id: AccountId(4),
+                protocol: ServerProtocol::Sftp,
+                name: "NAS".into(),
+                host: "nas.local".into(),
+                port: None,
+                transport: Transport::Tls,
+                username: "me".into(),
+                root: String::new(),
+                auth: ServerAuth::Agent,
+            }],
         };
         let rows = sidebar_rows(&data);
         let labels: Vec<(&str, &str)> = rows.iter().map(|r| (r.label.as_str(), r.detail.as_str())).collect();
@@ -450,8 +717,11 @@ mod tests {
                 ("AWS", ""),
                 ("photos", ""),
                 ("Offline", "timed out"),
+                ("Servers", ""),
+                ("NAS", ""),
             ]
         );
         assert_eq!(rows[11].location, "s3://1@photos/");
+        assert_eq!(rows[14].location, "sftp://4/");
     }
 }

@@ -1,11 +1,14 @@
 //! Streaming uploads. Small files are one conditional PUT; anything above
 //! one part becomes a multipart upload with several parts in flight at once.
 //! Every write is conditional (`If-None-Match: *`), so it never overwrites;
-//! a failed or abandoned upload is aborted so no orphaned parts are billed.
+//! a failed or abandoned upload is aborted so no orphaned parts are billed,
+//! unless it was checkpointed: then its upload id is the resume state, and
+//! resuming lists the parts already stored (ADR 0019).
 
+use application::ports::ResumeState;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::primitives::ByteStream as SdkStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Part};
 use domain::{BucketName, ByteSize, VfsError};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -16,7 +19,7 @@ use tokio::task::JoinHandle;
 use crate::errors::from_sdk;
 
 /// 8 MiB parts: above S3's 5 MiB minimum, and 10,000 parts reach ~80 GB.
-const PART_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const PART_SIZE: usize = 8 * 1024 * 1024;
 /// Parts uploading concurrently per file.
 const PARALLEL_PARTS: usize = 4;
 const ANY_EXISTING: &str = "*";
@@ -36,6 +39,8 @@ pub(crate) struct S3Sink {
     buffer: Vec<u8>,
     upload: Option<Upload>,
     finished: bool,
+    /// Checkpointed: dropping keeps the upload for resuming.
+    kept: bool,
 }
 
 impl S3Sink {
@@ -47,7 +52,45 @@ impl S3Sink {
         runtime: Handle,
     ) -> Self {
         let capacity = size_hint.map_or(0, |s| usize::try_from(s.0).unwrap_or(PART_SIZE).min(PART_SIZE));
-        Self { client, bucket, key, runtime, buffer: Vec::with_capacity(capacity), upload: None, finished: false }
+        Self {
+            client,
+            bucket,
+            key,
+            runtime,
+            buffer: Vec::with_capacity(capacity),
+            upload: None,
+            finished: false,
+            kept: false,
+        }
+    }
+
+    /// Continues upload `id`, keeping its leading run of whole parts. Parts
+    /// after a gap are uploaded again (they're overwritten by number).
+    pub(crate) async fn resume(
+        client: Client,
+        bucket: BucketName,
+        key: String,
+        id: String,
+        runtime: Handle,
+    ) -> Result<(Self, ByteSize), VfsError> {
+        let stored = stored_parts(&client, &bucket, &key, &id).await?;
+        let mut completed = Vec::new();
+        for (expected, part) in (1..).zip(stored) {
+            let whole = part.size().and_then(|s| usize::try_from(s).ok()) == Some(PART_SIZE);
+            if part.part_number() != Some(expected) || !whole {
+                break;
+            }
+            completed.push(
+                CompletedPart::builder().set_e_tag(part.e_tag().map(str::to_owned)).part_number(expected).build(),
+            );
+        }
+        let kept = completed.len();
+        let next_part = i32::try_from(kept + 1).map_err(|_| VfsError::Conflict)?;
+        let upload = Upload { id, next_part, completed, in_flight: FuturesUnordered::new() };
+        let mut sink = Self::new(client, bucket, key, None, runtime);
+        sink.upload = Some(upload);
+        sink.kept = true;
+        Ok((sink, ByteSize((kept * PART_SIZE) as u64)))
     }
 
     async fn upload_id(&mut self) -> Result<&mut Upload, VfsError> {
@@ -163,6 +206,9 @@ impl application::ports::WriteSink for S3Sink {
             let result = if self.upload.is_some() { self.finish_multipart().await } else { self.put_whole().await };
             if result.is_ok() {
                 self.finished = true;
+            } else {
+                // The job has failed, not paused: nothing will resume this.
+                self.kept = false;
             }
             // On failure, dropping `self` aborts the multipart upload.
             result
@@ -174,11 +220,53 @@ impl application::ports::WriteSink for S3Sink {
         self.finished = true;
         self.abort_request().unwrap_or_else(|| futures::future::ready(()).boxed())
     }
+
+    /// Available once the first part has started uploading.
+    fn checkpoint(&mut self) -> Option<ResumeState> {
+        let id = self.upload.as_ref()?.id.clone();
+        self.kept = true;
+        Some(ResumeState(id))
+    }
+}
+
+/// Every part stored for an upload, in part order. `NotFound` if the upload
+/// was completed or aborted.
+async fn stored_parts(client: &Client, bucket: &BucketName, key: &str, id: &str) -> Result<Vec<Part>, VfsError> {
+    let mut parts = Vec::new();
+    let mut marker = None;
+    loop {
+        let output = client
+            .list_parts()
+            .bucket(bucket.as_str())
+            .key(key)
+            .upload_id(id)
+            .set_part_number_marker(marker)
+            .send()
+            .await
+            .map_err(from_sdk)?;
+        parts.extend(output.parts().iter().cloned());
+        match output.next_part_number_marker() {
+            Some(next) if output.is_truncated() == Some(true) => marker = Some(next.to_owned()),
+            _ => break,
+        }
+    }
+    parts.sort_by_key(Part::part_number);
+    Ok(parts)
+}
+
+/// Aborts upload `id`; an upload that is already gone is fine.
+pub(crate) async fn discard_upload(client: &Client, bucket: &BucketName, key: &str, id: &str) -> Result<(), VfsError> {
+    match client.abort_multipart_upload().bucket(bucket.as_str()).key(key).upload_id(id).send().await.map_err(from_sdk)
+    {
+        Ok(_) | Err(VfsError::NotFound) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 impl Drop for S3Sink {
     fn drop(&mut self) {
         if !self.finished
+            && !self.kept
             && let Some(abort) = self.abort_request()
         {
             self.runtime.spawn(abort);

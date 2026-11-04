@@ -1,0 +1,22 @@
+[package]
+name = "adapter-smb"
+description = "smb:// provider: SMB 2/3 with the pure-Rust smb2 client (libsmbclient is GPL)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+smb2.workspace = true
+
+[dev-dependencies]
+vfs-contract-tests.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

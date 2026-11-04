@@ -11,7 +11,9 @@ watch. Callers must not special-case providers (Liskov), and adding one must not
   - M1: `Lister`, `Watcher`;
   - M2: `Copier`, `Mover`, `Remover`, `FolderMaker`, `Trasher`, `Launcher` (ADR 0008);
   - M4: streaming `Reader`/`Writer` for cross-provider copies (ADR 0015), and `MetadataEditor`, `Presigner`,
-    `VersionLister` for remote items (ADR 0014).
+    `VersionLister` for remote items (ADR 0014);
+  - M5a: resumable writes on the stream roles (ADR 0019); caching and offline access are decorators over any
+    provider, not roles (ADR 0020).
 - `MountHandle` holds an `Option<Arc<dyn Role>>` per role. A missing role yields
   `VfsError::Unsupported(capability)`, so a read-only provider implements nothing it can't do.
 - `Capabilities` is a value set: role presence (List, Watch, …) is derived automatically, and semantic

@@ -111,6 +111,7 @@ ApplicationWindow {
         SplitView.preferredWidth: 210
         SplitView.minimumWidth: 140
         controller: sidebarController
+        operations: fileOps
         onOpenRequested: location => window.currentView.controller.openLocationId(location)
     }
 
@@ -171,6 +172,43 @@ ApplicationWindow {
     CostDialog {
         operations: fileOps
     }
+
+    // Copies and moves a quit or crash cut short, offered once at start-up.
+    Dialog {
+        id: interrupted
+
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(480, parent.width - 32)
+        modal: true
+        visible: fileOps.interruptedCount > 0
+        closePolicy: Popup.NoAutoClose
+        title: fileOps.interruptedCount === 1 ? qsTr("A transfer didn't finish")
+                                              : qsTr("%1 transfers didn't finish").arg(fileOps.interruptedCount)
+
+        ColumnLayout {
+            anchors.fill: parent
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: qsTr("%1.\n\nResume continues where they stopped; what was already transferred is kept. Discard deletes the unfinished parts.").arg(fileOps.interruptedText)
+            }
+        }
+
+        footer: DialogButtonBox {
+            Button {
+                text: qsTr("Discard")
+                onClicked: fileOps.discardInterrupted()
+            }
+            Button {
+                text: qsTr("Resume")
+                highlighted: true
+                onClicked: fileOps.resumeInterrupted()
+            }
+        }
+    }
+
+    Component.onCompleted: fileOps.checkInterrupted()
 
     ConflictDialog {
         operations: fileOps

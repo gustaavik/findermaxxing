@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use domain::{
     AccountId, BucketName, ByteSize, Capabilities, Capability, ChangeEvent, Conflict, ConflictResolution, CostDecision,
-    CostWarning, EntryBatch, EntryKind, EntryMetadata, FileEntry, JobProgress, LIST_BATCH_SIZE, MountId, PathSegment,
-    S3Account, SavedSearch, SavedSearchId, Scheme, StoragePath, TrashTicket, VfsError, Visibility,
+    CostWarning, EntryBatch, EntryKind, EntryMetadata, FileEntry, HostKey, HostTrust, JobProgress, LIST_BATCH_SIZE,
+    MountId, PathSegment, S3Account, SavedSearch, SavedSearchId, Scheme, ServerAccount, ServerProtocol, StoragePath,
+    TrashTicket, VfsError, Visibility,
 };
 use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
@@ -17,11 +18,13 @@ use futures::{FutureExt, StreamExt};
 
 use crate::cancel::CancelToken;
 use crate::ports::{
-    AccountStore, ArchiveInspector, ArchiveItem, ArchiveListing, BucketInfo, ByteStream, Clock, ConflictResolver,
-    Copier, CostConfirmer, CredentialError, CredentialKey, CredentialStore, FavoritesStore, FolderMaker, JobObserver,
-    Launcher, Lister, LocalFile, LocalFileOpener, Materializer, MountHandle, Mover, NewS3Account, NewSavedSearch,
-    PreviewFailure, PreviewTheme, ProgressCallback, ProviderFactory, Reader, Remover, RenderedText, S3Connector,
-    SavedSearchStore, Secret, StoreError, TextRenderer, Trasher, Volume, VolumeLister, Watcher, WriteSink, Writer,
+    AccountStore, ArchiveInspector, ArchiveItem, ArchiveListing, BucketInfo, ByteStream, CacheIndex, CacheRecord,
+    Clock, ConflictResolver, ConnectError, Copier, CostConfirmer, CredentialError, CredentialKey, CredentialStore,
+    FavoritesStore, FolderMaker, InFlightWrite, InterruptedTransfer, JobObserver, JournalEntry, JournalId, Launcher,
+    Lister, LocalFile, LocalFileOpener, Materializer, MountHandle, Mover, NewS3Account, NewSavedSearch,
+    NewServerAccount, PinStore, PreviewFailure, PreviewTheme, ProgressCallback, ProviderFactory, Reader, Remover,
+    RenderedText, ResumeState, ResumedSink, S3Connector, SavedSearchStore, Secret, ServerAccountStore, ServerConnector,
+    StoreError, TextRenderer, TransferJournal, Trasher, Volume, VolumeLister, Watcher, WriteSink, Writer,
 };
 
 pub const FAKE_SCHEME: &str = "fake";
@@ -44,7 +47,13 @@ struct State {
     watchers: Vec<(StoragePath, mpsc::UnboundedSender<ChangeEvent>)>,
     failures: HashMap<StoragePath, VfsError>,
     rename_failures: HashMap<StoragePath, VfsError>,
+    list_failures: HashMap<StoragePath, VfsError>,
     launched: Vec<StoragePath>,
+    /// Partial writes handed out as resume states, by state.
+    partials: HashMap<String, (StoragePath, Vec<u8>)>,
+    next_partial: u64,
+    /// Offsets passed to `read_from`, for resume tests.
+    read_offsets: Vec<u64>,
 }
 
 /// How a fake mount presents itself to the application.
@@ -131,6 +140,12 @@ impl FakeVfs {
         self.lock().failures.insert(path, error);
     }
 
+    /// Listing and stat of `absolute` (a folder) fail, like a dropped connection.
+    pub fn fail_listing(&self, absolute: &str, error: VfsError) {
+        let path = self.path(absolute);
+        self.lock().list_failures.insert(path, error);
+    }
+
     /// Only renames of `absolute` fail (e.g. `CrossDevice` to force copy + delete).
     pub fn fail_rename(&self, absolute: &str, error: VfsError) {
         let path = self.path(absolute);
@@ -145,6 +160,25 @@ impl FakeVfs {
     #[must_use]
     pub fn contents(&self, absolute: &str) -> Option<Vec<u8>> {
         self.lock().nodes.get(&self.path(absolute)).map(|node| node.content.clone())
+    }
+
+    /// A partial write of `content` to `absolute`, as an interrupted run leaves it.
+    #[must_use]
+    pub fn seed_partial(&self, absolute: &str, content: &[u8]) -> ResumeState {
+        let path = self.path(absolute);
+        let mut state = self.lock();
+        new_partial(&mut state, path, content.to_vec())
+    }
+
+    #[must_use]
+    pub fn partial_count(&self) -> usize {
+        self.lock().partials.len()
+    }
+
+    /// Offsets resumed reads started from.
+    #[must_use]
+    pub fn read_offsets(&self) -> Vec<u64> {
+        self.lock().read_offsets.clone()
     }
 
     #[must_use]
@@ -238,6 +272,13 @@ impl FakeVfs {
     }
 }
 
+fn new_partial(state: &mut State, path: StoragePath, content: Vec<u8>) -> ResumeState {
+    state.next_partial += 1;
+    let key = format!("partial-{}", state.next_partial);
+    state.partials.insert(key.clone(), (path, content));
+    ResumeState(key)
+}
+
 fn node(path: &StoragePath, kind: EntryKind, content: Vec<u8>) -> Node {
     let size = (kind == EntryKind::File).then_some(ByteSize(content.len() as u64));
     relabel(path, Node { kind, metadata: EntryMetadata { size, ..EntryMetadata::default() }, content })
@@ -264,9 +305,11 @@ impl Lister for FakeVfs {
         dir: &StoragePath,
         cancel: CancelToken,
     ) -> impl Stream<Item = Result<EntryBatch, VfsError>> + Send + 'static {
-        let batches: Result<Vec<EntryBatch>, VfsError> = self
-            .require_dir(dir)
-            .map(|()| self.children(dir).chunks(LIST_BATCH_SIZE).map(<[FileEntry]>::to_vec).collect());
+        let failure = self.lock().list_failures.get(dir).cloned();
+        let batches: Result<Vec<EntryBatch>, VfsError> = failure.map_or(Ok(()), Err).and_then(|()| {
+            self.require_dir(dir)
+                .map(|()| self.children(dir).chunks(LIST_BATCH_SIZE).map(<[FileEntry]>::to_vec).collect())
+        });
         cancellable(batches, cancel)
     }
 
@@ -446,19 +489,38 @@ impl ProviderFactory for FakeFactory {
     }
 }
 
-/// Fake reads arrive in chunks this small so multi-chunk paths get exercised.
+/// Fake reads arrive in small chunks so multi-chunk paths get exercised;
+/// large files use at most this many chunks.
 const FAKE_READ_CHUNK: usize = 4;
+const FAKE_MAX_CHUNKS: usize = 64;
 
-impl Reader for FakeVfs {
-    async fn read(&self, path: &StoragePath, _cancel: CancelToken) -> Result<ByteStream, VfsError> {
+impl FakeVfs {
+    fn chunks_from(&self, path: &StoragePath, offset: usize) -> Result<ByteStream, VfsError> {
         self.check_failure(path)?;
         let node = self.node(path)?;
         if node.kind.is_container() {
             return Err(VfsError::IsADirectory);
         }
-        let chunks: Vec<Result<Vec<u8>, VfsError>> =
-            node.content.chunks(FAKE_READ_CHUNK).map(|chunk| Ok(chunk.to_vec())).collect();
+        let rest = node.content.get(offset..).unwrap_or_default();
+        let size = FAKE_READ_CHUNK.max(rest.len() / FAKE_MAX_CHUNKS);
+        let chunks: Vec<Result<Vec<u8>, VfsError>> = rest.chunks(size).map(|chunk| Ok(chunk.to_vec())).collect();
         Ok(stream::iter(chunks).boxed())
+    }
+}
+
+impl Reader for FakeVfs {
+    async fn read(&self, path: &StoragePath, _cancel: CancelToken) -> Result<ByteStream, VfsError> {
+        self.chunks_from(path, 0)
+    }
+
+    async fn read_from(
+        &self,
+        path: &StoragePath,
+        offset: ByteSize,
+        _cancel: CancelToken,
+    ) -> Result<ByteStream, VfsError> {
+        self.lock().read_offsets.push(offset.0);
+        self.chunks_from(path, usize::try_from(offset.0).unwrap_or(usize::MAX))
     }
 }
 
@@ -467,24 +529,55 @@ impl Writer for FakeVfs {
         self.check_failure(path)?;
         self.require_absent(path)?;
         self.require_parent_dir(path)?;
-        Ok(Box::new(FakeSink { fake: self.clone(), path: path.clone(), buffer: Vec::new() }))
+        Ok(Box::new(FakeSink { fake: self.clone(), path: path.clone(), buffer: Vec::new(), partial: None }))
+    }
+
+    async fn resume(&self, path: &StoragePath, state: &ResumeState) -> Result<ResumedSink, VfsError> {
+        let buffer = match self.lock().partials.get(&state.0) {
+            Some((target, content)) if target == path => content.clone(),
+            _ => return Err(VfsError::NotFound),
+        };
+        let offset = ByteSize(buffer.len() as u64);
+        let sink = FakeSink { fake: self.clone(), path: path.clone(), buffer, partial: Some(state.0.clone()) };
+        Ok(ResumedSink { sink: Box::new(sink), offset })
+    }
+
+    async fn discard(&self, _path: &StoragePath, state: &ResumeState) -> Result<(), VfsError> {
+        self.lock().partials.remove(&state.0);
+        Ok(())
     }
 }
 
-/// Buffers until commit, so nothing is visible before then.
+/// Buffers until commit, so nothing is visible before then. Once
+/// checkpointed, the buffer is mirrored as a partial that outlives the sink.
 struct FakeSink {
     fake: FakeVfs,
     path: StoragePath,
     buffer: Vec<u8>,
+    partial: Option<String>,
+}
+
+impl FakeSink {
+    fn forget_partial(&self) {
+        if let Some(key) = &self.partial {
+            self.fake.lock().partials.remove(key);
+        }
+    }
 }
 
 impl WriteSink for FakeSink {
     fn write(&mut self, chunk: Vec<u8>) -> BoxFuture<'_, Result<(), VfsError>> {
         self.buffer.extend(chunk);
+        if let Some(key) = &self.partial
+            && let Some((_, content)) = self.fake.lock().partials.get_mut(key)
+        {
+            content.clone_from(&self.buffer);
+        }
         future::ready(Ok(())).boxed()
     }
 
     fn commit(self: Box<Self>) -> BoxFuture<'static, Result<(), VfsError>> {
+        self.forget_partial();
         let result = self.fake.require_absent(&self.path).map(|()| {
             let committed = node(&self.path, EntryKind::File, self.buffer);
             self.fake.insert(&self.path, committed);
@@ -493,7 +586,17 @@ impl WriteSink for FakeSink {
     }
 
     fn abort(self: Box<Self>) -> BoxFuture<'static, ()> {
+        self.forget_partial();
         future::ready(()).boxed()
+    }
+
+    fn checkpoint(&mut self) -> Option<ResumeState> {
+        if let Some(key) = &self.partial {
+            return Some(ResumeState(key.clone()));
+        }
+        let state = new_partial(&mut self.fake.lock(), self.path.clone(), self.buffer.clone());
+        self.partial = Some(state.0.clone());
+        Some(state)
     }
 }
 
@@ -851,4 +954,276 @@ impl LocalFileOpener for RecordingOpener {
 #[allow(clippy::panic, reason = "test-support code: invalid fixtures are programmer errors")]
 fn unreachable_in_tests(error: &dyn std::error::Error) -> ! {
     panic!("invalid test fixture: {error}")
+}
+
+/// A journal in memory; `interrupted` lists every entry not finished.
+#[derive(Debug, Default)]
+pub struct InMemoryJournal {
+    entries: Mutex<BTreeMap<i64, (JournalEntry, Option<InFlightWrite>)>>,
+    next: Mutex<i64>,
+    checkpoints: Mutex<Vec<Option<InFlightWrite>>>,
+}
+
+impl InMemoryJournal {
+    /// Every checkpoint written, in order (`None` = cleared).
+    #[must_use]
+    pub fn checkpoints(&self) -> Vec<Option<InFlightWrite>> {
+        self.checkpoints.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// An entry as an interrupted earlier run would have left it.
+    #[must_use]
+    pub fn seed(&self, entry: JournalEntry, in_flight: Option<InFlightWrite>) -> InterruptedTransfer {
+        let id = self.allocate();
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner).insert(id.0, (entry.clone(), in_flight.clone()));
+        InterruptedTransfer { id, entry, in_flight }
+    }
+
+    fn allocate(&self) -> JournalId {
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        *next += 1;
+        JournalId(*next)
+    }
+}
+
+impl TransferJournal for InMemoryJournal {
+    fn begin(&self, entry: JournalEntry) -> BoxFuture<'static, Result<JournalId, StoreError>> {
+        let id = self.allocate();
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner).insert(id.0, (entry, None));
+        future::ready(Ok(id)).boxed()
+    }
+
+    fn checkpoint(&self, id: JournalId, write: Option<InFlightWrite>) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.checkpoints.lock().unwrap_or_else(PoisonError::into_inner).push(write.clone());
+        if let Some((_, in_flight)) = self.entries.lock().unwrap_or_else(PoisonError::into_inner).get_mut(&id.0) {
+            *in_flight = write;
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn finish(&self, id: JournalId) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner).remove(&id.0);
+        future::ready(Ok(())).boxed()
+    }
+
+    fn interrupted(&self) -> BoxFuture<'static, Result<Vec<InterruptedTransfer>, StoreError>> {
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let all = entries
+            .iter()
+            .map(|(id, (entry, in_flight))| InterruptedTransfer {
+                id: JournalId(*id),
+                entry: entry.clone(),
+                in_flight: in_flight.clone(),
+            })
+            .collect();
+        future::ready(Ok(all)).boxed()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryServers {
+    accounts: Mutex<Vec<ServerAccount>>,
+    next: Mutex<i64>,
+}
+
+impl InMemoryServers {
+    #[must_use]
+    pub fn all(&self) -> Vec<ServerAccount> {
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl ServerAccountStore for InMemoryServers {
+    fn list_servers(&self) -> BoxFuture<'static, Result<Vec<ServerAccount>, StoreError>> {
+        future::ready(Ok(self.all())).boxed()
+    }
+
+    fn add_server(&self, account: NewServerAccount) -> BoxFuture<'static, Result<ServerAccount, StoreError>> {
+        let id = {
+            let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+            *next += 1;
+            AccountId(*next)
+        };
+        let added = account.with_id(id);
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).push(added.clone());
+        future::ready(Ok(added)).boxed()
+    }
+
+    fn remove_server(&self, id: AccountId) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).retain(|a| a.id != id);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// A server connector. Passwords must be [`FakeServerConnector::VALID_SECRET`];
+/// with a host key set, the key must be accepted once before connecting.
+#[derive(Debug)]
+pub struct FakeServerConnector {
+    protocol: ServerProtocol,
+    host_key: Option<HostKey>,
+    trusted: Mutex<bool>,
+    connected: Mutex<Vec<AccountId>>,
+}
+
+impl FakeServerConnector {
+    pub const VALID_SECRET: &'static str = "correct";
+
+    #[must_use]
+    pub fn new(protocol: ServerProtocol) -> Self {
+        Self { protocol, host_key: None, trusted: Mutex::new(false), connected: Mutex::default() }
+    }
+
+    /// Like an SSH server seen for the first time.
+    #[must_use]
+    pub fn with_host_key(protocol: ServerProtocol, key: HostKey) -> Self {
+        Self { host_key: Some(key), ..Self::new(protocol) }
+    }
+
+    #[must_use]
+    pub fn connected(&self) -> Vec<AccountId> {
+        self.connected.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl ServerConnector for FakeServerConnector {
+    fn protocol(&self) -> ServerProtocol {
+        self.protocol
+    }
+
+    fn connect(
+        &self,
+        account: &ServerAccount,
+        secret: Option<Secret>,
+        trust: HostTrust,
+    ) -> BoxFuture<'static, Result<(), ConnectError>> {
+        let result = (|| {
+            if let Some(key) = &self.host_key {
+                let mut trusted = self.trusted.lock().unwrap_or_else(PoisonError::into_inner);
+                match &trust {
+                    HostTrust::Accept(accepted) if accepted == key => *trusted = true,
+                    HostTrust::Accept(_) => return Err(ConnectError::HostKeyChanged(key.clone())),
+                    HostTrust::KnownOnly if !*trusted => return Err(ConnectError::UnknownHost(key.clone())),
+                    HostTrust::KnownOnly => {}
+                }
+            }
+            if secret.as_ref().is_some_and(|s| s.expose() != Self::VALID_SECRET) {
+                return Err(ConnectError::Failed(VfsError::PermissionDenied));
+            }
+            self.connected.lock().unwrap_or_else(PoisonError::into_inner).push(account.id);
+            Ok(())
+        })();
+        future::ready(result).boxed()
+    }
+
+    fn disconnect(&self, id: AccountId) {
+        self.connected.lock().unwrap_or_else(PoisonError::into_inner).retain(|c| *c != id);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryPins {
+    pins: Mutex<Vec<StoragePath>>,
+}
+
+impl PinStore for InMemoryPins {
+    fn pins(&self) -> BoxFuture<'static, Result<Vec<StoragePath>, StoreError>> {
+        future::ready(Ok(self.pins.lock().unwrap_or_else(PoisonError::into_inner).clone())).boxed()
+    }
+
+    fn pin(&self, location: StoragePath) -> BoxFuture<'static, Result<(), StoreError>> {
+        let mut pins = self.pins.lock().unwrap_or_else(PoisonError::into_inner);
+        if !pins.contains(&location) {
+            pins.push(location);
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn unpin(&self, location: StoragePath) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.pins.lock().unwrap_or_else(PoisonError::into_inner).retain(|pin| *pin != location);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// Cache bookkeeping in memory.
+#[derive(Debug, Default)]
+pub struct InMemoryCacheIndex {
+    records: Mutex<BTreeMap<StoragePath, CacheRecord>>,
+    listings: Mutex<BTreeMap<StoragePath, Vec<FileEntry>>>,
+}
+
+impl CacheIndex for InMemoryCacheIndex {
+    fn lookup(&self, location: &StoragePath) -> BoxFuture<'static, Result<Option<CacheRecord>, StoreError>> {
+        future::ready(Ok(self.records.lock().unwrap_or_else(PoisonError::into_inner).get(location).cloned())).boxed()
+    }
+
+    fn record(&self, record: CacheRecord) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.records.lock().unwrap_or_else(PoisonError::into_inner).insert(record.location.clone(), record);
+        future::ready(Ok(())).boxed()
+    }
+
+    fn touch(&self, location: &StoragePath, at: domain::Timestamp) -> BoxFuture<'static, Result<(), StoreError>> {
+        if let Some(record) = self.records.lock().unwrap_or_else(PoisonError::into_inner).get_mut(location) {
+            record.last_used = at;
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn remove(&self, locations: Vec<StoragePath>) -> BoxFuture<'static, Result<(), StoreError>> {
+        let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        for location in locations {
+            records.remove(&location);
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn all(&self) -> BoxFuture<'static, Result<Vec<CacheRecord>, StoreError>> {
+        future::ready(Ok(self.records.lock().unwrap_or_else(PoisonError::into_inner).values().cloned().collect()))
+            .boxed()
+    }
+
+    fn save_listing(
+        &self,
+        folder: &StoragePath,
+        entries: Vec<FileEntry>,
+    ) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.listings.lock().unwrap_or_else(PoisonError::into_inner).insert(folder.clone(), entries);
+        future::ready(Ok(())).boxed()
+    }
+
+    fn listing(&self, folder: &StoragePath) -> BoxFuture<'static, Result<Option<Vec<FileEntry>>, StoreError>> {
+        future::ready(Ok(self.listings.lock().unwrap_or_else(PoisonError::into_inner).get(folder).cloned())).boxed()
+    }
+
+    fn listed_folders(&self) -> BoxFuture<'static, Result<Vec<StoragePath>, StoreError>> {
+        future::ready(Ok(self.listings.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect()))
+            .boxed()
+    }
+
+    fn remove_listings(&self, folders: Vec<StoragePath>) -> BoxFuture<'static, Result<(), StoreError>> {
+        let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
+        for folder in folders {
+            listings.remove(&folder);
+        }
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// Records which accounts' local copies were forgotten.
+#[derive(Debug, Default)]
+pub struct RecordingJanitor {
+    forgotten: Mutex<Vec<crate::ports::AccountMounts>>,
+}
+
+impl RecordingJanitor {
+    #[must_use]
+    pub fn forgotten(&self) -> Vec<crate::ports::AccountMounts> {
+        self.forgotten.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl crate::ports::CacheJanitor for RecordingJanitor {
+    fn forget(&self, account: crate::ports::AccountMounts) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.forgotten.lock().unwrap_or_else(PoisonError::into_inner).push(account);
+        future::ready(Ok(())).boxed()
+    }
 }

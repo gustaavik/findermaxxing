@@ -13,8 +13,12 @@ flowchart RL
     local["adapter-local-fs<br/><i>Lister, Watcher, Copier, Mover,<br/>Remover, FolderMaker, Trasher, Launcher,<br/>Reader, Writer, VolumeLister, LocalFileOpener</i>"] --> application
     tokio_rt["adapter-tokio-runtime<br/><i>Clock</i>"] --> application
     preview["adapter-preview<br/><i>TextRenderer, ArchiveInspector</i>"] --> application
-    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore,<br/>FavoritesStore</i>"] --> application
-    s3["adapter-s3<br/><i>Lister, Copier, Mover, Remover, FolderMaker,<br/>Reader, Writer, Materializer, MetadataEditor,<br/>Presigner, VersionLister, S3Connector</i>"] --> application
+    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore, ServerAccountStore,<br/>FavoritesStore, PinStore, CacheIndex, TransferJournal</i>"] --> application
+    cache["adapter-file-cache<br/><i>CachingResolver (MountResolver decorator),<br/>Materializer, Lister, CacheJanitor</i>"] --> application
+    sftp["adapter-sftp<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
+    webdav["adapter-webdav<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
+    smb["adapter-smb<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
+    s3["adapter-s3<br/><i>Lister, Copier, Mover, Remover, FolderMaker,<br/>Reader, Writer, MetadataEditor,<br/>Presigner, VersionLister, S3Connector</i>"] --> application
     keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
@@ -25,10 +29,14 @@ flowchart RL
     app --> store
     app --> s3
     app --> keyring
+    app --> cache
+    app --> sftp
+    app --> webdav
+    app --> smb
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M4)
+## Ports and their implementations (M1–M5a)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -38,14 +46,19 @@ flowchart RL
 | `Trasher` | `LocalTrash` (macOS `NSFileManager`, freedesktop Trash 1.0), `FakeVfs` | `trash_contract_tests!` against the real platform trash and the fake; freedesktop layout unit tests |
 | `Launcher` | `LocalFs` (`open` / `xdg-open`), `FakeVfs` | `application/tests/file_operations.rs::open_launches_the_item` |
 | `JobObserver`, `ConflictResolver` | `presentation::job_reporting` (Qt thread), `testing::{RecordingObserver, ScriptedResolver}` | use-case tests in `application/tests/file_operations.rs` |
-| `Materializer` | `LocalFs` (the file itself), `FakeVfs` | `application/tests/browse_and_find.rs::previews_are_routed_by_category` |
+| `Materializer` | `LocalFs` (the file itself), `adapter_file_cache::CachedMaterializer` (every remote provider), `FakeVfs` | `application/tests/browse_and_find.rs::previews_are_routed_by_category` |
 | `TextRenderer` | `adapter_preview::SyntectTextRenderer`, `testing::StubTextRenderer` | `adapter-preview/src/text.rs` tests (language detection, binary, truncation) |
 | `ArchiveInspector` | `adapter_preview::LocalArchiveInspector`, `testing::StubArchiveInspector` | `adapter-preview/src/archive.rs` tests (tar, tar.gz, zip, unsupported) |
 | `SavedSearchStore` | `adapter_sqlite_store::SqliteStore`, `testing::InMemorySavedSearches` | `adapter-sqlite-store/tests/saved_searches.rs` (persistence across reopen, ordering, corrupt rows) |
 | `Clock` | `adapter_tokio_runtime::TokioClock`, `testing::InstantClock` | `adapter-tokio-runtime` unit test |
 | `ProviderFactory` / `MountResolver` | `LocalFsFactory`, `adapter_s3::S3Service`, `ProviderRegistry` | `application::registry` tests |
-| `Lister`, `Copier`, `Mover`, `Remover`, `FolderMaker` on S3 | `adapter_s3::BucketFs` | `adapter-s3/tests/s3_contract.rs` (lister, mutation and stream suites, 29 cases) against SeaweedFS in CI |
-| `Reader`, `Writer` | `LocalFs` (hidden partial file + no-replace rename), `BucketFs` (PUT / multipart, `If-None-Match: *`), `FakeVfs` | `stream_contract_tests!` (7 cases) for all three; cross-provider use cases in `application/tests/across_providers.rs` |
+| `Lister`, `Copier`, `Mover`, `Remover`, `FolderMaker` on S3 | `adapter_s3::BucketFs` | `adapter-s3/tests/s3_contract.rs` (lister, mutation, stream and resume suites plus multipart copy, 32 cases) against SeaweedFS in CI |
+| `Reader`, `Writer` | `LocalFs` (hidden partial file + no-replace rename), `BucketFs` (PUT / multipart, `If-None-Match: *`), `SftpFs`, `DavFs`, `SmbFs`, `FakeVfs` | `stream_contract_tests!` (7 cases) for all; cross-provider use cases in `application/tests/across_providers.rs` |
+| `Writer::resume`/`discard`, `WriteSink::checkpoint`, `Reader::read_from` | `LocalFs`, `BucketFs` (ListParts), `SftpFs`, `SmbFs`, `FakeVfs` (WebDAV: not resumable) | `resume_contract_tests!` (2 cases) for each; `application/tests/resume_servers_offline.rs` |
+| `Lister`, `Copier`, `Mover`, `Remover`, `FolderMaker` on servers | `adapter_sftp::SftpFs`, `adapter_webdav::DavFs`, `adapter_smb::SmbFs` | `adapter-{sftp,webdav,smb}/tests/*_contract.rs` against OpenSSH, Apache `mod_dav` and Samba in Docker (32, 30 and 32 cases) |
+| `ServerConnector`, `ServerAccountStore` | `SftpService`, `WebDavService`, `SmbService`; `SqliteStore`; `testing::{FakeServerConnector, InMemoryServers}` | host-key and sign-in cases in each contract file; `resume_servers_offline.rs`; `adapter-sqlite-store/tests/servers_cache_journal.rs` |
+| `TransferJournal` | `SqliteStore`, `testing::InMemoryJournal` | `servers_cache_journal.rs` (survives reopen); `resume_servers_offline.rs` |
+| `CacheIndex`, `PinStore`, `CacheJanitor` | `SqliteStore`, `adapter_file_cache::FileCache`; `testing::{InMemoryCacheIndex, InMemoryPins, RecordingJanitor}` | `adapter-file-cache/tests/cache.rs` (freshness, LRU eviction with pins, offline browsing, forgetting an account); `domain::cache` unit tests |
 | `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |
 | `S3Connector` | `S3Service`, `testing::FakeS3Connector` | `across_providers.rs` (add/rollback, buckets by name, permission denied) |
 | `AccountStore`, `FavoritesStore` | `SqliteStore`, `testing::{InMemoryAccounts, InMemoryFavorites}` | `adapter-sqlite-store/tests/accounts_and_favorites.rs` |
@@ -73,6 +86,13 @@ flowchart RL
 2. `CopyEntries` scans the sources, builds a `TransferEstimate` and asks `CostPolicy`; if it warns, `QtCostConfirmer` shows `CostDialog.qml` unless the account opted out.
 3. Each item is routed: server-side `CopyObject` inside one bucket, otherwise `Reader` → `Writer` streaming (8 MiB multipart parts, 4 in flight).
 4. S3 has no watcher, so when the job ends the controller emits `folders_changed` and open views of the affected folders reload.
+
+## Runtime flow: resuming after a quit (M5a)
+
+1. A copy or move job is recorded in the `TransferJournal` before it starts; a file of 16 MiB or more also records its writer's `ResumeState` once the writer can describe one.
+2. The app quits mid-upload: the job future is dropped, the checkpointed sink keeps its partial data, and the journal row stays.
+3. At the next start `checkInterrupted` finds the row and the window offers Resume or Discard.
+4. `ResumeTransfer` reruns the job in "earlier run" mode: finished files are kept, existing folders are merged into, and the in-flight file continues at `Writer::resume`'s offset with `Reader::read_from`.
 
 ## Dependency injection without globals
 `app` builds `AppServices` (use cases + runtime handle). `bootstrap.cpp` wraps them in a `ServicesHolder` QObject

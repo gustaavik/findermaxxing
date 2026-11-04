@@ -73,6 +73,13 @@ impl MountHandle {
         self.capabilities
     }
 
+    /// For decorators (caching, offline access) that replace some roles and
+    /// keep the rest.
+    #[must_use]
+    pub fn into_builder(self) -> MountHandleBuilder {
+        MountHandleBuilder { handle: self }
+    }
+
     /// The provider's region (for cross-region cost warnings), if it has one.
     #[must_use]
     pub fn region(&self) -> Option<&str> {

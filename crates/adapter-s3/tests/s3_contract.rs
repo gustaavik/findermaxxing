@@ -96,8 +96,7 @@ async fn fixture() -> S3Fixture {
     let name = format!("fm-test-{nanos}-{}", BUCKETS.fetch_add(1, Ordering::SeqCst));
     raw.create_bucket().bucket(&name).send().await.expect("S3 test server reachable (see module docs)");
 
-    let cache = tempfile::tempdir().unwrap().keep();
-    let service = S3Service::new(tokio::runtime::Handle::current(), cache).unwrap();
+    let service = S3Service::new(tokio::runtime::Handle::current()).unwrap();
     let account = S3Account {
         id: ACCOUNT,
         name: "test".into(),
@@ -127,4 +126,32 @@ mod mutation {
 mod stream {
     use super::fixture;
     vfs_contract_tests::stream_contract_tests!(fixture, #[ignore = "needs an S3 server: FM_S3_TEST_ENDPOINT"]);
+}
+
+mod resume {
+    use super::fixture;
+    vfs_contract_tests::resume_contract_tests!(fixture, #[ignore = "needs an S3 server: FM_S3_TEST_ENDPOINT"]);
+}
+
+/// The multipart server-side copy used above 5 GB, with the thresholds
+/// lowered so a 12 MiB object takes that path in 5 MiB parts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an S3 server: FM_S3_TEST_ENDPOINT"]
+async fn large_objects_are_copied_in_parts() {
+    use application::ports::Copier;
+    use vfs_contract_tests::VfsFixture;
+    const MIB: u64 = 1024 * 1024;
+    let fixture = fixture().await;
+    let payload: Vec<u8> = (0..12 * MIB).map(|i| (i % 241) as u8).collect();
+    fixture.create_file("big.bin", &payload).await;
+    let bucket = fixture.vfs().clone().with_copy_limits(MIB, 5 * MIB);
+    let (from, to) = (fixture.root().join(segment("big.bin")), fixture.root().join(segment("copy.bin")));
+    let copied =
+        bucket.copy_item(&from, &to, std::sync::Arc::new(|_| {}), application::CancelToken::never()).await.unwrap();
+    assert_eq!(copied.0, 12 * MIB);
+    assert!(fixture.read_file("copy.bin").await.unwrap() == payload, "the part copy must be byte-identical");
+}
+
+fn segment(name: &str) -> domain::PathSegment {
+    domain::PathSegment::new(name).unwrap()
 }

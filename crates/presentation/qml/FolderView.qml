@@ -43,6 +43,29 @@ FocusScope {
         return entries.selectedLocations()
     }
 
+    // Our own locations ride along with the file URLs, so a drop inside the
+    // app moves the real items rather than cached copies of remote ones.
+    readonly property string locationsMime: "application/x-findermaxxing-locations"
+    property bool dragPending: false
+    property bool pointerDown: false
+
+    // Local files for other apps can take a moment (remote items download
+    // first), so the drag starts when they are ready, if the button is still down.
+    function beginDrag() {
+        if (entries.selectedCount === 0) {
+            return
+        }
+        dragPending = true
+        operations.prepareDrag(selection())
+    }
+
+    function dropOn(drop, index) {
+        const target = index >= 0 && entries.isContainerAt(index) ? entries.locationAt(index) : controller.locationId
+        operations.dropItems(drop.urls.map(url => url.toString()), drop.getDataAsString(locationsMime) ?? "",
+                             target, OperationsController.FollowKeys)
+        drop.accept()
+    }
+
     function startRename(row) {
         if (entries.selectedCount > 1 && entries.isSelected(row)) {
             bulkRename.openFor(selection())
@@ -454,10 +477,16 @@ FocusScope {
                 }
 
                 MouseArea {
+                    readonly property bool dragging: drag.active
+
                     anchors.fill: parent
                     enabled: root.renamingRow !== row.index
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    drag.target: dragProxy
+                    onDraggingChanged: if (dragging) root.beginDrag()
+                    onReleased: root.pointerDown = false
                     onPressed: mouse => {
+                        root.pointerDown = mouse.button === Qt.LeftButton
                         list.forceActiveFocus()
                         list.currentIndex = row.index
                         if (mouse.button === Qt.RightButton) {
@@ -488,6 +517,12 @@ FocusScope {
             }
 
             onCurrentIndexChanged: root.updatePreview()
+
+            DropArea {
+                anchors.fill: parent
+                onEntered: drag => drag.accept()
+                onDropped: drop => root.dropOn(drop, list.indexAt(drop.x + list.contentX, drop.y + list.contentY))
+            }
 
             Keys.onPressed: event => {
                 const extend = (event.modifiers & Qt.ShiftModifier) !== 0
@@ -579,6 +614,36 @@ FocusScope {
         }
     }
 
+    // Carries the drag: Drag.Automatic hands it to the OS, so it can leave
+    // the window and land in Finder, a mail, or another app.
+    Item {
+        id: dragProxy
+        width: 1
+        height: 1
+        Drag.dragType: Drag.Automatic
+        Drag.supportedActions: Qt.CopyAction | Qt.MoveAction
+        Drag.onDragFinished: {
+            Drag.active = false
+            x = 0
+            y = 0
+        }
+    }
+
+    Connections {
+        target: root.operations
+        function onDragReady(urls, internal) {
+            if (!root.dragPending) {
+                return
+            }
+            root.dragPending = false
+            if (!root.pointerDown || urls.length === 0 && internal === "") {
+                return
+            }
+            dragProxy.Drag.mimeData = { "text/uri-list": urls, [root.locationsMime]: internal }
+            dragProxy.Drag.active = true
+        }
+    }
+
     Menu {
         id: contextMenu
 
@@ -610,6 +675,20 @@ FocusScope {
         MenuItem {
             text: qsTr("Add to Sidebar")
             onTriggered: root.sidebar.addFavorite(root.selectedOrCurrentFolder())
+        }
+        MenuItem {
+            text: qsTr("Keep Available Offline")
+            visible: controller.offlineCapable
+            height: visible ? implicitHeight : 0
+            enabled: contextMenu.hasSelection
+            onTriggered: root.operations.makeAvailableOffline(root.selection())
+        }
+        MenuItem {
+            text: qsTr("Remove Offline Copy")
+            visible: controller.offlineCapable
+            height: visible ? implicitHeight : 0
+            enabled: contextMenu.singleSelection
+            onTriggered: root.operations.removeOfflineCopy(root.entries.locationAt(list.currentIndex))
         }
         MenuItem {
             text: qsTr("Quick Look")

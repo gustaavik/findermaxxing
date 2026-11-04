@@ -1,13 +1,20 @@
 use std::sync::Arc;
 
 use application::operations::OperationHistory;
-use application::ports::{FavoritesStore, LocalFileOpener, MountResolver, SavedSearchStore, VolumeLister};
+use application::ports::{
+    CacheJanitor, FavoritesStore, LocalFileOpener, MountResolver, PinStore, SavedSearchStore, TransferJournal,
+    VolumeLister,
+};
 use application::use_cases::{
     AccountServices, AddBucket, AddFavorite, AddS3Account, BulkRenameEntries, ConnectSavedAccounts, CopyEntries,
     CreateFolder, CreateShareLink, DeletePermanently, DeleteSavedSearch, GetItemProperties, ListBuckets, ListDirectory,
     ListFavorites, ListItemVersions, ListS3Accounts, ListSavedSearches, ListVolumes, MoveEntries, OpenEntry,
     PreparePreview, RedoOperation, RemoveFavorite, RemoveS3Account, RenameEntry, SaveSearch, SearchFiles,
     SetCostWarnings, TrashEntries, UndoOperation, UpdateItemProperties, WatchDirectory,
+};
+use application::use_cases::{
+    AddServer, ConnectServer, DiscardTransfer, ForgetLocalCopies, GetOfflineStatus, ListInterruptedTransfers,
+    ListServers, MakeAvailableOffline, RemoveOfflineCopy, RemoveServer, ResumeTransfer, ServerServices,
 };
 use domain::{CostPolicy, StoragePath};
 use tokio::runtime::Handle;
@@ -27,6 +34,8 @@ pub struct AppServices {
     pub operations: FileOperations,
     pub places: Places,
     pub accounts: RemoteAccounts,
+    pub servers: ServerAccounts,
+    pub offline: Offline,
     pub item_details: ItemDetails,
     /// Runs every background task of the UI (sessions, jobs, previews).
     pub runtime: Handle,
@@ -72,17 +81,28 @@ pub struct FileOperations {
     pub open: Arc<OpenEntry>,
     pub undo: Arc<UndoOperation>,
     pub redo: Arc<RedoOperation>,
+    pub interrupted: Arc<ListInterruptedTransfers>,
+    pub resume: Arc<ResumeTransfer>,
+    pub discard: Arc<DiscardTransfer>,
     pub history: Arc<OperationHistory>,
 }
 
 impl FileOperations {
     /// Every use case over the same mounts, sharing one fresh history.
+    /// Copies and moves are journaled so they can resume after a quit.
     #[must_use]
-    pub fn new(mounts: &Arc<dyn MountResolver>, opener: Arc<dyn LocalFileOpener>, costs: CostPolicy) -> Self {
+    pub fn new(
+        mounts: &Arc<dyn MountResolver>,
+        opener: Arc<dyn LocalFileOpener>,
+        costs: CostPolicy,
+        journal: &Arc<dyn TransferJournal>,
+    ) -> Self {
         let history = Arc::new(OperationHistory::default());
+        let copy = CopyEntries::new(mounts.clone(), history.clone()).with_cost_policy(costs);
+        let move_entries = MoveEntries::new(mounts.clone(), history.clone()).with_cost_policy(costs);
         Self {
-            copy: Arc::new(CopyEntries::new(mounts.clone(), history.clone()).with_cost_policy(costs)),
-            move_entries: Arc::new(MoveEntries::new(mounts.clone(), history.clone()).with_cost_policy(costs)),
+            copy: Arc::new(copy.with_journal(journal.clone())),
+            move_entries: Arc::new(move_entries.with_journal(journal.clone())),
             rename: Arc::new(RenameEntry::new(mounts.clone(), history.clone())),
             bulk_rename: Arc::new(BulkRenameEntries::new(mounts.clone(), history.clone())),
             trash: Arc::new(TrashEntries::new(mounts.clone(), history.clone())),
@@ -91,7 +111,53 @@ impl FileOperations {
             open: Arc::new(OpenEntry::new(mounts.clone(), opener)),
             undo: Arc::new(UndoOperation::new(mounts.clone(), history.clone())),
             redo: Arc::new(RedoOperation::new(mounts.clone(), history.clone())),
+            interrupted: Arc::new(ListInterruptedTransfers::new(journal.clone())),
+            resume: Arc::new(ResumeTransfer::new(mounts.clone(), history.clone(), journal.clone())),
+            discard: Arc::new(DiscardTransfer::new(mounts.clone(), journal.clone())),
             history,
+        }
+    }
+}
+
+/// SFTP, WebDAV and SMB account use cases.
+#[derive(Debug, Clone)]
+pub struct ServerAccounts {
+    pub add: Arc<AddServer>,
+    pub list: Arc<ListServers>,
+    pub connect: Arc<ConnectServer>,
+    pub remove: Arc<RemoveServer>,
+}
+
+impl ServerAccounts {
+    #[must_use]
+    pub fn new(services: &ServerServices) -> Self {
+        Self {
+            add: Arc::new(AddServer::new(services.clone())),
+            list: Arc::new(ListServers::new(services.store.clone())),
+            connect: Arc::new(ConnectServer::new(services.clone())),
+            remove: Arc::new(RemoveServer::new(services.clone())),
+        }
+    }
+}
+
+/// Keeping remote items available offline, and forgetting a removed
+/// account's local copies.
+#[derive(Debug, Clone)]
+pub struct Offline {
+    pub make_available: Arc<MakeAvailableOffline>,
+    pub remove: Arc<RemoveOfflineCopy>,
+    pub status: Arc<GetOfflineStatus>,
+    pub forget_account: Arc<ForgetLocalCopies>,
+}
+
+impl Offline {
+    #[must_use]
+    pub fn new(mounts: &Arc<dyn MountResolver>, pins: &Arc<dyn PinStore>, janitor: Arc<dyn CacheJanitor>) -> Self {
+        Self {
+            make_available: Arc::new(MakeAvailableOffline::new(mounts.clone(), pins.clone())),
+            remove: Arc::new(RemoveOfflineCopy::new(pins.clone())),
+            status: Arc::new(GetOfflineStatus::new(pins.clone())),
+            forget_account: Arc::new(ForgetLocalCopies::new(janitor)),
         }
     }
 }
@@ -170,8 +236,9 @@ impl ItemDetails {
 pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices {
     use application::ProviderRegistry;
     use application::testing::{
-        FakeS3Connector, FixedVolumes, InMemoryAccounts, InMemoryFavorites, InMemoryKeychain, InMemorySavedSearches,
-        InstantClock, RecordingOpener, StubArchiveInspector, StubTextRenderer,
+        FakeS3Connector, FakeServerConnector, FixedVolumes, InMemoryAccounts, InMemoryFavorites, InMemoryJournal,
+        InMemoryKeychain, InMemoryPins, InMemorySavedSearches, InMemoryServers, InstantClock, RecordingOpener,
+        StubArchiveInspector, StubTextRenderer,
     };
     use application::use_cases::CoalesceWindow;
 
@@ -185,6 +252,13 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
         credentials: Arc::new(InMemoryKeychain::default()),
         connector: Arc::new(FakeS3Connector::default()),
     };
+    let servers = ServerServices {
+        store: Arc::new(InMemoryServers::default()),
+        credentials: Arc::new(InMemoryKeychain::default()),
+        connectors: vec![Arc::new(FakeServerConnector::new(domain::ServerProtocol::Sftp))],
+    };
+    let journal: Arc<dyn TransferJournal> = Arc::new(InMemoryJournal::default());
+    let pins: Arc<dyn PinStore> = Arc::new(InMemoryPins::default());
     AppServices {
         list_directory: Arc::new(ListDirectory::new(mounts.clone())),
         watch_directory: Arc::new(WatchDirectory::new(
@@ -199,9 +273,11 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
             Arc::new(StubArchiveInspector),
         )),
         saved_searches: SavedSearches::new(&saved),
-        operations: FileOperations::new(&mounts, Arc::new(RecordingOpener::default()), CostPolicy::default()),
+        operations: FileOperations::new(&mounts, Arc::new(RecordingOpener::default()), CostPolicy::default(), &journal),
         places: Places::new(&favorites, Arc::new(FixedVolumes::default())),
         accounts: RemoteAccounts::new(&accounts),
+        servers: ServerAccounts::new(&servers),
+        offline: Offline::new(&mounts, &pins, Arc::new(application::testing::RecordingJanitor::default())),
         item_details: ItemDetails::new(&mounts),
         mounts,
         runtime: Handle::current(),

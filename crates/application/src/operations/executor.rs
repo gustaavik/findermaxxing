@@ -9,8 +9,11 @@ use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
 use super::progress::ProgressTracker;
 use super::relocate::{needs_staging, rename_batch};
+use super::resume::Resumption;
 use super::scan::scan;
 use super::transfer::{Route, move_across, move_item};
+
+static NO_RESUMPTION: Resumption = Resumption::none();
 use crate::ports::MountResolver;
 
 /// What "trash" means on a location without a Trash (S3).
@@ -191,6 +194,6 @@ async fn move_one(
     let dest = mounts.resolve(relocation.to.mount()).map_err(OperationError::on(&relocation.to))?;
     let tree = scan(&*lister, entry.clone(), &ctx.cancel).await.map_err(OperationError::on(from))?;
     tracker.add_totals(tree.item_count().saturating_sub(1), tree.bytes);
-    let route = Route { source: &source, dest: &dest, same_mount: false };
+    let route = Route { source: &source, dest: &dest, same_mount: false, resume: &NO_RESUMPTION };
     move_across(&route, &entry, &tree, &relocation.to, tracker, &ctx.cancel).await
 }

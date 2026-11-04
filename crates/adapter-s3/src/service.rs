@@ -2,7 +2,6 @@
 //! roles because opening a bucket mount needs the account's client.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use application::ports::{BucketInfo, MountHandle, ProviderFactory, S3Connector, Secret};
@@ -37,7 +36,6 @@ struct Connected {
 struct Inner {
     scheme: Scheme,
     runtime: Handle,
-    cache_root: PathBuf,
     accounts: RwLock<HashMap<AccountId, Connected>>,
 }
 
@@ -48,13 +46,11 @@ pub struct S3Service {
 }
 
 impl S3Service {
-    /// `cache_root` holds downloaded copies for previews and "open".
-    ///
     /// # Errors
     /// Never in practice; the scheme literal is validated like any other.
-    pub fn new(runtime: Handle, cache_root: PathBuf) -> Result<Self, PathError> {
+    pub fn new(runtime: Handle) -> Result<Self, PathError> {
         let scheme = Scheme::new(S3_SCHEME)?;
-        Ok(Self { inner: Arc::new(Inner { scheme, runtime, cache_root, accounts: RwLock::default() }) })
+        Ok(Self { inner: Arc::new(Inner { scheme, runtime, accounts: RwLock::default() }) })
     }
 
     /// The bucket's roles, for callers that need the concrete type (tests).
@@ -63,8 +59,7 @@ impl S3Service {
     /// `Unsupported(List)` if the account isn't connected.
     pub fn open_bucket(&self, location: &S3Location) -> Result<BucketFs, VfsError> {
         let (client, _) = self.client_for(location).ok_or(VfsError::Unsupported(Capability::List))?;
-        let cache = self.inner.cache_root.join(location.account.to_string()).join(location.bucket.as_str());
-        Ok(BucketFs::new(client, location.bucket.clone(), self.inner.runtime.clone(), cache))
+        Ok(BucketFs::new(client, location.bucket.clone(), self.inner.runtime.clone()))
     }
 
     fn client_for(&self, location: &S3Location) -> Option<(Client, String)> {
@@ -181,7 +176,6 @@ impl ProviderFactory for S3Service {
             .folder_maker(bucket.clone())
             .reader(bucket.clone())
             .writer(bucket.clone())
-            .materializer(bucket.clone())
             .metadata_editor(bucket.clone())
             .presigner(bucket.clone())
             .version_lister(bucket)

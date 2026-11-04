@@ -3,10 +3,11 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 4.**
+**Status: milestone 5a** (M5 is split: M5b adds Google Drive, Dropbox and OneDrive).
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
+- M5a: SFTP, WebDAV and SMB servers; iCloud Drive and other synced cloud folders under Locations; a size-limited cache with *Keep Available Offline*; transfers that resume after a quit or crash; drag and drop with other apps.
 - M4: S3 and S3-compatible storage (AWS, R2, B2, Wasabi, MinIO, SeaweedFS) in a unified sidebar with places and favorites. Copy and move stream between providers, transfers that may cost money ask first, and secrets live in the OS keychain.
 
 ## Prerequisites
@@ -49,6 +50,18 @@ docker run -d --rm --name findermaxxing-s3 -p 127.0.0.1:8333:8333 chrislusf/seaw
 cargo test -p adapter-s3 --test s3_contract -- --ignored     # FM_S3_TEST_ENDPOINT, _ACCESS_KEY, _SECRET_KEY override the defaults
 cargo test -p adapter-keyring -- --ignored                   # writes and deletes one item in your real keychain
 docker stop findermaxxing-s3
+```
+
+File-server contract tests (OpenSSH, Apache `mod_dav` and Samba in Docker, as in CI):
+
+```sh
+docker run -d --rm --name findermaxxing-sftp -p 127.0.0.1:2222:22 atmoz/sftp fmtest:fmtest-secret:::upload
+docker run -d --rm --name findermaxxing-dav -p 127.0.0.1:8090:80 -e AUTH_TYPE=Basic -e USERNAME=fmtest -e PASSWORD=fmtest-secret bytemark/webdav
+docker run -d --rm --name findermaxxing-smb -p 127.0.0.1:1445:445 -e USER=fmtest -e PASS=fmtest-secret -e NAME=Data dockurr/samba
+cargo test -p adapter-sftp --test sftp_contract -- --ignored
+cargo test -p adapter-webdav --test dav_contract -- --ignored
+cargo test -p adapter-smb --test smb_contract -- --ignored
+docker stop findermaxxing-sftp findermaxxing-dav findermaxxing-smb
 ```
 
 ## Manually testing M1
@@ -111,6 +124,31 @@ Start SeaweedFS as above (or use a real bucket), then `cargo run -p app --releas
 - **Favorites:** right-click any folder, local or S3 → *Add to Sidebar*. Mounted volumes appear under *Locations*, accounts under *Cloud Storage*.
 - **Remove the account:** right-click → *Remove Account*. The keychain item goes with it (check *Keychain Access* for `FinderMaxxing`).
 
+## Manually testing M5a
+
+Start the three servers above, then `cargo run -p app --release`.
+
+- **Connect to a server:** *Connect to Server…* at the bottom of the sidebar.
+  - **SFTP:** server `127.0.0.1`, port `2222`, folder `upload`, user `fmtest`, password `fmtest-secret`. The first time you'll see the server's key fingerprint; *Trust and Connect* remembers it, and later connections don't ask. Compare it with `ssh-keyscan -p 2222 127.0.0.1 | ssh-keygen -lf -`.
+  - **WebDAV:** port `8090`, untick *Use HTTPS* (note the warning), same user and password. For Nextcloud, use your server with path `remote.php/dav/files/<user>`.
+  - **SMB:** port `1445`, share `Data`, same user and password. For a NAS, leave the port empty (445).
+  - A wrong password or address shows the problem and saves nothing.
+- **Your own SSH keys:** *Sign in with: SSH agent* uses whatever `ssh-add -l` lists; *Key file* takes Ed25519 or ECDSA keys. RSA keys work through the agent only (see ADR 0021).
+- **Browse and work:** copy, paste, move, rename, new folder and delete work as on the local disk. Servers have no Trash, so deleting asks first.
+- **Drag and drop:**
+  - Drag files from a server to the Desktop or into a mail: they are downloaded first.
+  - Drag from Finder into a server folder, or between two server folders.
+  - Within one location a drag moves; across locations it copies. Hold ⌥ to copy or ⌘ to move (Ctrl/Shift on Linux).
+  - Drops onto a folder row or a sidebar entry go into that folder.
+- **Offline:**
+  1. Right-click a server folder → *Keep Available Offline*. A job downloads it.
+  2. Stop the container (`docker stop findermaxxing-sftp`).
+  3. The folder is still listed and its files still open (read-only).
+  4. *Remove Offline Copy* unpins it.
+- **Resume:** copy a big file (`mkfile 2g /tmp/big`) to the SFTP server and quit the app mid-way. Restart: the window offers *Resume* (it continues where it stopped) or *Discard* (deletes the partial upload). The same works for S3 and SMB; WebDAV restarts the file.
+- **Cloud folders:** iCloud Drive and any Google Drive, OneDrive or Dropbox desktop folders appear under *Locations*.
+- **Remove a server:** right-click → *Remove Server…*. The keychain item, cached copies and offline pins go with it.
+
 ## Layout
 
 ```
@@ -122,10 +160,14 @@ crates/
   adapter-preview/        syntax highlighting (syntect) and archive listings (zip, tar)
   adapter-s3/             s3:// provider (aws-sdk-s3): listing, server-side copy, streaming multipart upload, presign
   adapter-keyring/        CredentialStore on the OS keychain (Keychain, Secret Service)
-  adapter-sqlite-store/   metadata store (SQLite): saved searches, S3 accounts, favorites
+  adapter-file-cache/     size-limited cache of remote files, offline pins and listings (decorates any provider)
+  adapter-sftp/           sftp:// provider (russh): host-key trust, agent/key/password, resumable writes
+  adapter-webdav/         dav:// provider (reqwest + rustls): Nextcloud, ownCloud, NAS, Apache
+  adapter-smb/            smb:// provider (pure-Rust smb2): Windows and NAS shares, resumable writes
+  adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal
   adapter-tokio-runtime/  Clock on tokio
   presentation/           cxx-qt controllers (folder view, operations, preview, bulk rename, sidebar, item info), C++ models,
-                          clipboard and Quick Look shims, QML
+                          clipboard, keyboard and Quick Look shims, QML
   app/                    composition root (the `findermaxxing` binary)
   arch-tests/             fails CI if layers point the wrong way
 xtask/                    cargo xtask ci | licenses

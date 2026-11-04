@@ -34,6 +34,22 @@ jobs:
           docker logs findermaxxing-s3; exit 1
       - name: S3 contract tests
         run: cargo test -p adapter-s3 --test s3_contract -- --ignored
+      - name: Start SFTP, WebDAV and SMB servers
+        run: |
+          docker run -d --rm --name findermaxxing-sftp -p 127.0.0.1:2222:22 atmoz/sftp fmtest:fmtest-secret:::upload
+          docker run -d --rm --name findermaxxing-dav -p 127.0.0.1:8090:80 \
+            -e AUTH_TYPE=Basic -e USERNAME=fmtest -e PASSWORD=fmtest-secret bytemark/webdav
+          docker run -d --rm --name findermaxxing-smb -p 127.0.0.1:1445:445 \
+            -e USER=fmtest -e PASS=fmtest-secret -e NAME=Data dockurr/samba
+          for port in 2222 8090 1445; do
+            for _ in $(seq 60); do (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 1; done
+          done
+          sleep 3
+      - name: File-server contract tests
+        run: |
+          cargo test -p adapter-sftp --test sftp_contract -- --ignored
+          cargo test -p adapter-webdav --test dav_contract -- --ignored
+          cargo test -p adapter-smb --test smb_contract -- --ignored
       - uses: actions/upload-artifact@v4
         with:
           name: third-party-licenses

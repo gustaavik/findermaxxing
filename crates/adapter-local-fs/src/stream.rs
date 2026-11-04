@@ -1,14 +1,15 @@
 //! `Reader` and `Writer` for local files. Writes go to a hidden temporary file
 //! next to the target and appear with a no-replace rename on commit, so a
-//! half-written file is never visible under its real name.
+//! half-written file is never visible under its real name. A checkpointed
+//! write keeps its partial file when dropped, so it can be resumed by name.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use application::CancelToken;
-use application::ports::{ByteStream, Reader, WriteSink, Writer};
+use application::ports::{ByteStream, Reader, ResumeState, ResumedSink, WriteSink, Writer};
 use domain::{ByteSize, StoragePath, VfsError};
 use futures::future::BoxFuture;
 use futures::stream;
@@ -28,13 +29,24 @@ static PARTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl Reader for LocalFs {
     async fn read(&self, path: &StoragePath, cancel: CancelToken) -> Result<ByteStream, VfsError> {
+        self.read_from(path, ByteSize(0), cancel).await
+    }
+
+    async fn read_from(
+        &self,
+        path: &StoragePath,
+        offset: ByteSize,
+        cancel: CancelToken,
+    ) -> Result<ByteStream, VfsError> {
         let native = to_native(path)?;
         let file = self
             .blocking(move || {
                 if fs::metadata(&native).map_err(|e| from_io(&e))?.is_dir() {
                     return Err(VfsError::IsADirectory);
                 }
-                File::open(&native).map_err(|e| from_io(&e))
+                let mut file = File::open(&native).map_err(|e| from_io(&e))?;
+                file.seek(SeekFrom::Start(offset.0)).map_err(|e| from_io(&e))?;
+                Ok(file)
             })
             .await?;
         let runtime = self.runtime().clone();
@@ -77,10 +89,44 @@ impl Writer for LocalFs {
             }
             let partial = partial_path(&target)?;
             let file = OpenOptions::new().write(true).create_new(true).open(&partial).map_err(|e| from_io(&e))?;
-            Ok(Box::new(LocalSink { runtime, file: Some(file), partial, target }) as Box<dyn WriteSink>)
+            Ok(Box::new(LocalSink { runtime, file: Some(file), partial, target, kept: false }) as Box<dyn WriteSink>)
         })
         .await
     }
+
+    async fn resume(&self, path: &StoragePath, state: &ResumeState) -> Result<ResumedSink, VfsError> {
+        let target = to_native(path)?;
+        let partial = resumable_partial(&target, state)?;
+        let runtime = self.runtime().clone();
+        self.blocking(move || {
+            if fs::symlink_metadata(&target).is_ok() {
+                return Err(VfsError::AlreadyExists);
+            }
+            let file = OpenOptions::new().append(true).open(&partial).map_err(|e| from_io(&e))?;
+            let offset = ByteSize(file.metadata().map_err(|e| from_io(&e))?.len());
+            let sink = LocalSink { runtime, file: Some(file), partial, target, kept: true };
+            Ok(ResumedSink { sink: Box::new(sink), offset })
+        })
+        .await
+    }
+
+    async fn discard(&self, path: &StoragePath, state: &ResumeState) -> Result<(), VfsError> {
+        let partial = resumable_partial(&to_native(path)?, state)?;
+        self.blocking(move || match fs::remove_file(&partial) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(from_io(&error)),
+            _ => Ok(()),
+        })
+        .await
+    }
+}
+
+/// The partial file a state names. Only our own partial names in the
+/// target's folder are accepted, so a state can never point elsewhere.
+fn resumable_partial(target: &Path, state: &ResumeState) -> Result<PathBuf, VfsError> {
+    let name = &state.0;
+    let ours = name.starts_with(PARTIAL_PREFIX) && !name.contains(std::path::MAIN_SEPARATOR);
+    let parent = target.parent().ok_or(VfsError::NotFound)?;
+    if ours { Ok(parent.join(name)) } else { Err(VfsError::NotFound) }
 }
 
 fn partial_path(target: &Path) -> Result<PathBuf, VfsError> {
@@ -95,6 +141,8 @@ struct LocalSink {
     file: Option<File>,
     partial: PathBuf,
     target: PathBuf,
+    /// Checkpointed: the partial file outlives the sink for resuming.
+    kept: bool,
 }
 
 impl WriteSink for LocalSink {
@@ -134,16 +182,23 @@ impl WriteSink for LocalSink {
         .boxed()
     }
 
-    fn abort(self: Box<Self>) -> BoxFuture<'static, ()> {
-        // Dropping removes the partial file.
+    fn abort(mut self: Box<Self>) -> BoxFuture<'static, ()> {
+        // Dropping an unkept sink removes the partial file.
+        self.kept = false;
         drop(self);
         futures::future::ready(()).boxed()
+    }
+
+    fn checkpoint(&mut self) -> Option<ResumeState> {
+        let name = self.partial.file_name()?.to_str()?.to_owned();
+        self.kept = true;
+        Some(ResumeState(name))
     }
 }
 
 impl Drop for LocalSink {
     fn drop(&mut self) {
-        if !self.partial.as_os_str().is_empty() {
+        if !self.kept && !self.partial.as_os_str().is_empty() {
             let _ = fs::remove_file(&self.partial);
         }
     }

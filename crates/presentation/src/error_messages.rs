@@ -1,4 +1,6 @@
 use application::operations::OperationError;
+use application::ports::ConnectError;
+use application::use_cases::ServerError;
 use domain::{PathSegment, StoragePath, VfsError};
 
 /// Maps domain errors to wording suitable for the window, never raw OS text
@@ -33,8 +35,37 @@ pub(crate) fn operation_message(error: &OperationError) -> Option<String> {
         }
         OperationError::NothingToUndo => "There is nothing to undo.".to_owned(),
         OperationError::NothingToRedo => "There is nothing to redo.".to_owned(),
+        OperationError::Store(problem) => format!("The app's settings couldn't be saved ({problem})."),
     };
     Some(text)
+}
+
+/// Why a server account couldn't be added or connected.
+pub(crate) fn server_message(error: &ServerError) -> String {
+    match error {
+        ServerError::MissingSecret => "Enter the password.".to_owned(),
+        ServerError::Keychain(error) => format!("The keychain couldn't be used: {error}"),
+        ServerError::Store(error) => format!("The server couldn't be saved: {error}"),
+        ServerError::NoProvider(protocol) => format!("{protocol} servers aren't supported in this build."),
+        ServerError::Connect(ConnectError::UnknownHost(_)) => {
+            "The server's identity hasn't been confirmed yet. Connect again to check it.".to_owned()
+        }
+        ServerError::Connect(ConnectError::HostKeyChanged(key)) => format!(
+            "The server's identity has changed (now {}). Someone may be intercepting the connection. If the server \
+             was reinstalled, remove its old key from ~/.ssh/known_hosts and connect again.",
+            key.fingerprint
+        ),
+        ServerError::Connect(ConnectError::Failed(VfsError::PermissionDenied)) => {
+            "The user name or password wasn't accepted.".to_owned()
+        }
+        ServerError::Connect(ConnectError::Failed(VfsError::NotFound)) => {
+            "The server answered, but the folder or share doesn't exist.".to_owned()
+        }
+        ServerError::Connect(ConnectError::Failed(VfsError::Transient { .. })) => {
+            "The server didn't answer. Check the address and that you're online.".to_owned()
+        }
+        ServerError::Connect(ConnectError::Failed(error)) => format!("Couldn't connect: {error}"),
+    }
 }
 
 /// Message for an item that could not be opened.

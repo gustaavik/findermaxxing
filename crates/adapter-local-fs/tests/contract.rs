@@ -92,6 +92,7 @@ mod mutation {
 mod stream {
     use super::fixture;
     vfs_contract_tests::stream_contract_tests!(fixture);
+    vfs_contract_tests::resume_contract_tests!(fixture);
 }
 
 mod trash {

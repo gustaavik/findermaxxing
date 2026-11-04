@@ -235,6 +235,11 @@ QString EntryListModel::nameAt(int row) const
     return isValidRow(row) ? toQString(m_rows[static_cast<std::size_t>(row)].name) : QString();
 }
 
+bool EntryListModel::isContainerAt(int row) const
+{
+    return isValidRow(row) && m_rows[static_cast<std::size_t>(row)].is_container;
+}
+
 int EntryListModel::rowOfLocation(const QString& location) const
 {
     const QByteArray wanted = location.toUtf8();

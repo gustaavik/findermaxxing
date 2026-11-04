@@ -6,19 +6,28 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use adapter_file_cache::{CachingResolver, FileCache};
 use adapter_keyring::KeyringStore;
 use adapter_local_fs::{LocalFs, LocalFsFactory, LocalOpener, LocalTrash, LocalVolumes, storage_path_from_native};
 use adapter_preview::{LocalArchiveInspector, SyntectTextRenderer};
 use adapter_s3::S3Service;
+use adapter_sftp::SftpService;
+use adapter_smb::SmbService;
 use adapter_sqlite_store::SqliteStore;
 use adapter_tokio_runtime::TokioClock;
+use adapter_webdav::WebDavService;
 use application::ProviderRegistry;
-use application::ports::{FavoritesStore, MountResolver, SavedSearchStore, StoreError};
-use application::use_cases::{
-    AccountServices, CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, WatchDirectory,
+use application::ports::{
+    CacheIndex, CredentialStore, FavoritesStore, MountResolver, PinStore, SavedSearchStore, ServerConnector,
+    StoreError, TransferJournal,
 };
-use domain::CostPolicy;
-use presentation::{AppServices, FileOperations, ItemDetails, Places, RemoteAccounts, SavedSearches};
+use application::use_cases::{
+    AccountServices, CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, ServerServices, WatchDirectory,
+};
+use domain::{CachePolicy, CostPolicy};
+use presentation::{
+    AppServices, FileOperations, ItemDetails, Offline, Places, RemoteAccounts, SavedSearches, ServerAccounts,
+};
 use tokio::runtime::Handle;
 
 const HOME_VARIABLE: &str = "HOME";
@@ -26,7 +35,8 @@ const FALLBACK_HOME: &str = "/";
 const RUNTIME_THREAD_NAME: &str = "findermaxxing-worker";
 const APP_FOLDER: &str = "FinderMaxxing";
 const METADATA_FILE: &str = "metadata.sqlite3";
-const S3_CACHE_FOLDER: &str = "s3";
+const FILE_CACHE_FOLDER: &str = "files";
+const KNOWN_HOSTS_FILE: &str = "known_hosts";
 #[cfg(target_os = "macos")]
 const PLATFORM_DATA_HOME: &str = "Library/Application Support";
 #[cfg(not(target_os = "macos"))]
@@ -65,14 +75,21 @@ fn main() -> ExitCode {
 fn start() -> Result<i32, StartupError> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name(RUNTIME_THREAD_NAME).build()?;
     let handle = runtime.handle().clone();
-    let s3 =
-        S3Service::new(handle.clone(), platform_dir(CACHE_HOME_VARIABLE, PLATFORM_CACHE_HOME).join(S3_CACHE_FOLDER))?;
-    let mounts = build_registry(handle.clone(), s3.clone())?;
     let store = metadata_store(&handle)?;
+    let providers = Providers::new(&handle)?;
+    let cache = file_cache(&handle, &store);
+    let mounts = build_registry(&handle, &providers, cache.clone())?;
     let saved: Arc<dyn SavedSearchStore> = store.clone();
     let favorites: Arc<dyn FavoritesStore> = store.clone();
-    let accounts =
-        AccountServices { store, credentials: Arc::new(KeyringStore::new(handle.clone())), connector: Arc::new(s3) };
+    let pins: Arc<dyn PinStore> = store.clone();
+    let journal: Arc<dyn TransferJournal> = store.clone();
+    let credentials: Arc<dyn CredentialStore> = Arc::new(KeyringStore::new(handle.clone()));
+    let servers = ServerServices {
+        store: store.clone(),
+        credentials: credentials.clone(),
+        connectors: providers.server_connectors(),
+    };
+    let accounts = AccountServices { store, credentials, connector: Arc::new(providers.s3.clone()) };
     let services = AppServices {
         list_directory: Arc::new(ListDirectory::new(mounts.clone())),
         watch_directory: Arc::new(WatchDirectory::new(mounts.clone(), Arc::new(TokioClock), CoalesceWindow::default())),
@@ -83,9 +100,16 @@ fn start() -> Result<i32, StartupError> {
             Arc::new(LocalArchiveInspector::new(handle.clone())),
         )),
         saved_searches: SavedSearches::new(&saved),
-        operations: FileOperations::new(&mounts, Arc::new(LocalOpener::new(handle.clone())), CostPolicy::default()),
+        operations: FileOperations::new(
+            &mounts,
+            Arc::new(LocalOpener::new(handle.clone())),
+            CostPolicy::default(),
+            &journal,
+        ),
         places: Places::new(&favorites, Arc::new(LocalVolumes::new(handle.clone()))),
         accounts: RemoteAccounts::new(&accounts),
+        servers: ServerAccounts::new(&servers),
+        offline: Offline::new(&mounts, &pins, Arc::new(cache)),
         item_details: ItemDetails::new(&mounts),
         mounts,
         runtime: handle,
@@ -97,11 +121,58 @@ fn start() -> Result<i32, StartupError> {
     Ok(exit_code)
 }
 
-/// Every provider is registered here and nowhere else (Open/Closed).
-fn build_registry(runtime: Handle, s3: S3Service) -> Result<Arc<dyn MountResolver>, StartupError> {
-    let local = LocalFsFactory::new(LocalFs::new(runtime.clone()), LocalTrash::platform_default(runtime))?;
-    let registry = ProviderRegistry::default().with_provider(Arc::new(local))?.with_provider(Arc::new(s3))?;
-    Ok(Arc::new(registry))
+/// The remote providers; each is both a mount factory and a connector.
+struct Providers {
+    s3: S3Service,
+    sftp: SftpService,
+    webdav: WebDavService,
+    smb: SmbService,
+}
+
+impl Providers {
+    fn new(runtime: &Handle) -> Result<Self, StartupError> {
+        let known_hosts = platform_dir(DATA_HOME_VARIABLE, PLATFORM_DATA_HOME).join(KNOWN_HOSTS_FILE);
+        Ok(Self {
+            s3: S3Service::new(runtime.clone())?,
+            sftp: SftpService::new(runtime.clone(), known_hosts)?,
+            webdav: WebDavService::new(runtime.clone())?,
+            smb: SmbService::new(runtime.clone())?,
+        })
+    }
+
+    fn server_connectors(&self) -> Vec<Arc<dyn ServerConnector>> {
+        vec![Arc::new(self.sftp.clone()), Arc::new(self.webdav.clone()), Arc::new(self.smb.clone())]
+    }
+}
+
+/// Every provider is registered here and nowhere else (Open/Closed). Remote
+/// mounts get the local cache and offline access by decoration (ADR 0020).
+fn build_registry(
+    runtime: &Handle,
+    providers: &Providers,
+    cache: FileCache,
+) -> Result<Arc<dyn MountResolver>, StartupError> {
+    let local = LocalFsFactory::new(LocalFs::new(runtime.clone()), LocalTrash::platform_default(runtime.clone()))?;
+    let registry = ProviderRegistry::default()
+        .with_provider(Arc::new(local))?
+        .with_provider(Arc::new(providers.s3.clone()))?
+        .with_provider(Arc::new(providers.sftp.clone()))?
+        .with_provider(Arc::new(providers.webdav.clone()))?
+        .with_provider(Arc::new(providers.smb.clone()))?;
+    Ok(Arc::new(CachingResolver::new(Arc::new(registry), cache)))
+}
+
+/// Downloaded copies of remote files, size-limited (ADR 0020).
+fn file_cache(runtime: &Handle, store: &Arc<SqliteStore>) -> FileCache {
+    let index: Arc<dyn CacheIndex> = store.clone();
+    let pins: Arc<dyn PinStore> = store.clone();
+    FileCache::new(
+        platform_dir(CACHE_HOME_VARIABLE, PLATFORM_CACHE_HOME).join(FILE_CACHE_FOLDER),
+        index,
+        pins,
+        CachePolicy::default(),
+        runtime.clone(),
+    )
 }
 
 /// The app's SQLite store. If the file can't be opened (read-only home,
