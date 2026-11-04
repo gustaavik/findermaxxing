@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use application::use_cases::ChangeBatch;
 use domain::{ChangeEvent, EntryBatch, FileEntry, SortSpec, StoragePath};
 
-use crate::row_format::to_row;
+use crate::row_format::RowContext;
 use crate::rows_bridge::EntryRow;
 
 /// Above this many changes in one batch, a reset is cheaper for Qt than
@@ -30,13 +30,18 @@ pub(crate) enum ChangeOutcome {
 #[derive(Debug)]
 pub(crate) struct DirectoryViewModel {
     sort: SortSpec,
+    rows: RowContext,
     entries: Vec<FileEntry>,
     sorted: bool,
 }
 
 impl DirectoryViewModel {
     pub(crate) fn new(sort: SortSpec) -> Self {
-        Self { sort, entries: Vec::new(), sorted: true }
+        Self::with_rows(sort, RowContext::Browse)
+    }
+
+    pub(crate) fn with_rows(sort: SortSpec, rows: RowContext) -> Self {
+        Self { sort, rows, entries: Vec::new(), sorted: true }
     }
 
     pub(crate) fn clear(&mut self) {
@@ -58,7 +63,7 @@ impl DirectoryViewModel {
 
     pub(crate) fn snapshot(&mut self) -> ModelUpdate {
         self.ensure_sorted();
-        ModelUpdate::Reset(self.entries.iter().map(to_row).collect())
+        ModelUpdate::Reset(self.entries.iter().map(|entry| self.rows.row(entry)).collect())
     }
 
     pub(crate) fn set_sort(&mut self, sort: SortSpec) -> ModelUpdate {
@@ -93,7 +98,7 @@ impl DirectoryViewModel {
             self.entries.remove(index);
         }
         let index = self.insertion_point(&entry);
-        let row = to_row(&entry);
+        let row = self.rows.row(&entry);
         self.entries.insert(index, entry);
         match previous {
             Some(old) if old == index => vec![ModelUpdate::Replace { index, row }],
@@ -128,6 +133,7 @@ impl DirectoryViewModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::row_format::to_row;
     use application::testing::FakeVfs;
     use domain::{SortKey, SortOrder};
 
@@ -203,6 +209,27 @@ mod tests {
     fn rescan_is_requested() {
         let mut vm = DirectoryViewModel::new(SortSpec::default());
         assert_eq!(vm.apply(vec![ChangeEvent::Rescan]), ChangeOutcome::RescanRequired);
+    }
+
+    #[test]
+    fn search_rows_name_their_folder() {
+        let fake = FakeVfs::new();
+        fake.add_dir("/s");
+        fake.add_dir("/s/sub");
+        fake.add_file("/s/top.txt", 1);
+        fake.add_file("/s/sub/deep.txt", 1);
+        let found: Vec<FileEntry> = ["/s/top.txt", "/s/sub/deep.txt"]
+            .iter()
+            .map(|p| match fake.upserted(p) {
+                ChangeEvent::Upserted(entry) => entry,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let mut vm = DirectoryViewModel::with_rows(SortSpec::default(), RowContext::SearchIn(fake.path("/s")));
+        vm.add_batch(found);
+        let ModelUpdate::Reset(rows) = vm.snapshot() else { panic!() };
+        let folders: Vec<&str> = rows.iter().map(|r| r.folder_text.as_str()).collect();
+        assert_eq!(folders, ["sub", "—"]);
     }
 
     #[test]

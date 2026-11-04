@@ -128,6 +128,9 @@ pub mod qobject {
         fn answer_conflict(self: Pin<&mut OperationsController>, answer: ConflictAnswer, reach: AnswerReach);
         #[qinvokable]
         fn dismiss_error(self: Pin<&mut OperationsController>);
+        /// Re-reads the undo/redo labels after work done outside this controller.
+        #[qinvokable]
+        fn refresh_history(self: Pin<&mut OperationsController>);
 
         /// A folder made by `newFolder`; the view selects it and starts renaming.
         #[qsignal]
@@ -396,7 +399,7 @@ impl qobject::OperationsController {
         }
     }
 
-    fn refresh_history(mut self: Pin<&mut Self>) {
+    pub fn refresh_history(mut self: Pin<&mut Self>) {
         let Some(services) = self.app_services() else { return };
         let (undo, redo) = (services.operations.history.next_undo(), services.operations.history.next_redo());
         self.as_mut().set_can_undo(undo.is_some());

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use domain::{Capabilities, Capability, MountId, Scheme, VfsError};
 
-use super::{DynCopier, DynFolderMaker, DynLauncher, DynLister, DynMover, DynRemover, DynTrasher, DynWatcher};
+use super::{
+    DynCopier, DynFolderMaker, DynLauncher, DynLister, DynMaterializer, DynMover, DynRemover, DynTrasher, DynWatcher,
+};
 
 /// Declares the role slots of [`MountHandle`]: one optional `Arc<dyn Role>`
 /// each, a builder method that also records the matching [`Capability`], and
@@ -55,6 +57,7 @@ mount_roles! {
     folder_maker: DynFolderMaker => CreateFolder,
     trasher: DynTrasher => Trash,
     launcher: DynLauncher => Launch,
+    materializer: DynMaterializer => LocalAccess,
 }
 
 impl MountHandle {

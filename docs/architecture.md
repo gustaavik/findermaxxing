@@ -12,15 +12,19 @@ flowchart RL
 
     local["adapter-local-fs<br/><i>Lister, Watcher, Copier, Mover,<br/>Remover, FolderMaker, Trasher, Launcher</i>"] --> application
     tokio_rt["adapter-tokio-runtime<br/><i>Clock</i>"] --> application
+    preview["adapter-preview<br/><i>TextRenderer, ArchiveInspector</i>"] --> application
+    store["adapter-sqlite-store<br/><i>SavedSearchStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
 
     app["app<br/><i>composition root</i>"] --> local
     app --> tokio_rt
+    app --> preview
+    app --> store
     app --> presentation
 ```
 
-## Ports and their implementations (M1 + M2)
+## Ports and their implementations (M1–M3)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -30,6 +34,10 @@ flowchart RL
 | `Trasher` | `LocalTrash` (macOS `NSFileManager`, freedesktop Trash 1.0), `FakeVfs` | `trash_contract_tests!` against the real platform trash and the fake; freedesktop layout unit tests |
 | `Launcher` | `LocalFs` (`open` / `xdg-open`), `FakeVfs` | `application/tests/file_operations.rs::open_launches_the_item` |
 | `JobObserver`, `ConflictResolver` | `presentation::job_reporting` (Qt thread), `testing::{RecordingObserver, ScriptedResolver}` | use-case tests in `application/tests/file_operations.rs` |
+| `Materializer` | `LocalFs` (the file itself), `FakeVfs` | `application/tests/browse_and_find.rs::previews_are_routed_by_category` |
+| `TextRenderer` | `adapter_preview::SyntectTextRenderer`, `testing::StubTextRenderer` | `adapter-preview/src/text.rs` tests (language detection, binary, truncation) |
+| `ArchiveInspector` | `adapter_preview::LocalArchiveInspector`, `testing::StubArchiveInspector` | `adapter-preview/src/archive.rs` tests (tar, tar.gz, zip, unsupported) |
+| `SavedSearchStore` | `adapter_sqlite_store::SqliteStore`, `testing::InMemorySavedSearches` | `adapter-sqlite-store/tests/saved_searches.rs` (persistence across reopen, ordering, corrupt rows) |
 | `Clock` | `adapter_tokio_runtime::TokioClock`, `testing::InstantClock` | `adapter-tokio-runtime` unit test |
 | `ProviderFactory` / `MountResolver` | `LocalFsFactory`, `ProviderRegistry` | `application::registry` tests |
 

@@ -1,4 +1,4 @@
-use domain::{ByteSize, EntryKind, FileEntry, SymlinkTarget};
+use domain::{ByteSize, EntryKind, FileEntry, PathSegment, StoragePath, SymlinkTarget};
 
 use crate::rows_bridge::EntryRow;
 
@@ -15,6 +15,37 @@ mod icon {
     pub const OTHER: &str = "other";
 }
 
+/// Shown in the folder column for results directly inside the search scope.
+const SCOPE_FOLDER_TEXT: &str = "—";
+const FOLDER_SEPARATOR: &str = "/";
+
+/// How rows describe their entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RowContext {
+    Browse,
+    /// Search results also say which folder (below `scope`) they are in.
+    SearchIn(StoragePath),
+}
+
+impl RowContext {
+    pub(crate) fn row(&self, entry: &FileEntry) -> EntryRow {
+        let mut row = to_row(entry);
+        if let Self::SearchIn(scope) = self {
+            row.folder_text = folder_text(entry, scope);
+        }
+        row
+    }
+}
+
+fn folder_text(entry: &FileEntry, scope: &StoragePath) -> String {
+    let Some(parent) = entry.path().parent() else { return String::new() };
+    let below = parent.segments().strip_prefix(scope.segments()).unwrap_or(parent.segments());
+    if below.is_empty() {
+        return SCOPE_FOLDER_TEXT.to_owned();
+    }
+    below.iter().map(PathSegment::display_name).collect::<Vec<_>>().join(FOLDER_SEPARATOR)
+}
+
 pub(crate) fn to_row(entry: &FileEntry) -> EntryRow {
     let modified = entry.metadata().modified;
     EntryRow {
@@ -26,6 +57,7 @@ pub(crate) fn to_row(entry: &FileEntry) -> EntryRow {
         has_modified: modified.is_some(),
         is_container: entry.kind().is_container(),
         is_hidden: entry.is_hidden(),
+        folder_text: String::new(),
     }
 }
 

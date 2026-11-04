@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# Pure-Rust, no IO: bulk-rename patterns are a business rule.
+regex.workspace = true
 
 [lints]
 workspace = true

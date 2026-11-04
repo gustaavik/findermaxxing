@@ -6,6 +6,8 @@ default-members = [
     "crates/application",
     "crates/vfs-contract-tests",
     "crates/adapter-local-fs",
+    "crates/adapter-preview",
+    "crates/adapter-sqlite-store",
     "crates/adapter-tokio-runtime",
     "crates/arch-tests",
     "xtask",
@@ -15,6 +17,8 @@ members = [
     "crates/application",
     "crates/vfs-contract-tests",
     "crates/adapter-local-fs",
+    "crates/adapter-preview",
+    "crates/adapter-sqlite-store",
     "crates/adapter-tokio-runtime",
     "crates/presentation",
     "crates/app",
@@ -35,6 +39,8 @@ application = { path = "crates/application" }
 vfs-contract-tests = { path = "crates/vfs-contract-tests" }
 adapter-local-fs = { path = "crates/adapter-local-fs" }
 adapter-tokio-runtime = { path = "crates/adapter-tokio-runtime" }
+adapter-preview = { path = "crates/adapter-preview" }
+adapter-sqlite-store = { path = "crates/adapter-sqlite-store" }
 presentation = { path = "crates/presentation" }
 
 thiserror = "2"
@@ -47,6 +53,14 @@ libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSFileManager", "NSURL", "NSString", "NSError"] }
 tempfile = "3"
+regex = "1.13"
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+# Only the bundled grammars/themes, HTML output and the pure-Rust regex engine (no YAML loader, no oniguruma).
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "html", "regex-fancy"] }
+zip = { version = "9.3", default-features = false }
+tar = "0.4.46"
+flate2 = "1.1"
 serde_json = "1"
 cxx = "1.0.205"
 cxx-qt = "0.10.0"

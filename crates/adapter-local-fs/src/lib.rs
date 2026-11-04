@@ -1,7 +1,7 @@
 //! `file://` provider.
 //!
 //! Implements `Lister`, `Watcher`, `Copier`, `Mover`, `Remover`,
-//! `FolderMaker`, `Launcher` and (via [`LocalTrash`]) `Trasher`. Proven by the
+//! `FolderMaker`, `Launcher`, `Materializer` and (via [`LocalTrash`]) `Trasher`. Proven by the
 //! shared contract suites in `tests/contract.rs` plus local-only cases in
 //! `tests/local_fs.rs`. Unix only (macOS, Linux).
 
@@ -10,6 +10,7 @@ mod error;
 mod factory;
 mod launcher;
 mod lister;
+mod materializer;
 mod mutation;
 mod native_path;
 mod sys;

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use application::operations::OperationHistory;
-use application::ports::MountResolver;
+use application::ports::{MountResolver, SavedSearchStore};
 use application::use_cases::{
-    CopyEntries, CreateFolder, DeletePermanently, ListDirectory, MoveEntries, OpenEntry, RedoOperation, RenameEntry,
+    BulkRenameEntries, CopyEntries, CreateFolder, DeletePermanently, DeleteSavedSearch, ListDirectory,
+    ListSavedSearches, MoveEntries, OpenEntry, PreparePreview, RedoOperation, RenameEntry, SaveSearch, SearchFiles,
     TrashEntries, UndoOperation, WatchDirectory,
 };
 use domain::StoragePath;
@@ -14,23 +15,34 @@ use tokio::runtime::Handle;
 /// each controller's `services`.
 #[derive(Debug, Clone)]
 pub struct AppServices {
-    pub(crate) list_directory: Arc<ListDirectory>,
-    pub(crate) watch_directory: Arc<WatchDirectory>,
-    pub(crate) operations: FileOperations,
-    pub(crate) runtime: Handle,
-    pub(crate) home: StoragePath,
+    pub list_directory: Arc<ListDirectory>,
+    pub watch_directory: Arc<WatchDirectory>,
+    pub search: Arc<SearchFiles>,
+    pub preview: Arc<PreparePreview>,
+    pub saved_searches: SavedSearches,
+    pub operations: FileOperations,
+    /// Runs every background task of the UI (sessions, jobs, previews).
+    pub runtime: Handle,
+    /// Where new windows open; bare paths typed by the user resolve on its mount.
+    pub home: StoragePath,
 }
 
-impl AppServices {
+/// Saved-search use cases over one store.
+#[derive(Debug, Clone)]
+pub struct SavedSearches {
+    pub save: Arc<SaveSearch>,
+    pub list: Arc<ListSavedSearches>,
+    pub delete: Arc<DeleteSavedSearch>,
+}
+
+impl SavedSearches {
     #[must_use]
-    pub fn new(
-        list_directory: Arc<ListDirectory>,
-        watch_directory: Arc<WatchDirectory>,
-        operations: FileOperations,
-        runtime: Handle,
-        home: StoragePath,
-    ) -> Self {
-        Self { list_directory, watch_directory, operations, runtime, home }
+    pub fn new(store: &Arc<dyn SavedSearchStore>) -> Self {
+        Self {
+            save: Arc::new(SaveSearch::new(store.clone())),
+            list: Arc::new(ListSavedSearches::new(store.clone())),
+            delete: Arc::new(DeleteSavedSearch::new(store.clone())),
+        }
     }
 }
 
@@ -40,6 +52,7 @@ pub struct FileOperations {
     pub copy: Arc<CopyEntries>,
     pub move_entries: Arc<MoveEntries>,
     pub rename: Arc<RenameEntry>,
+    pub bulk_rename: Arc<BulkRenameEntries>,
     pub trash: Arc<TrashEntries>,
     pub delete: Arc<DeletePermanently>,
     pub create_folder: Arc<CreateFolder>,
@@ -58,6 +71,7 @@ impl FileOperations {
             copy: Arc::new(CopyEntries::new(mounts.clone(), history.clone())),
             move_entries: Arc::new(MoveEntries::new(mounts.clone(), history.clone())),
             rename: Arc::new(RenameEntry::new(mounts.clone(), history.clone())),
+            bulk_rename: Arc::new(BulkRenameEntries::new(mounts.clone(), history.clone())),
             trash: Arc::new(TrashEntries::new(mounts.clone(), history.clone())),
             delete: Arc::new(DeletePermanently::new(mounts.clone())),
             create_folder: Arc::new(CreateFolder::new(mounts.clone(), history.clone())),

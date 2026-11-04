@@ -11,6 +11,9 @@ fn main() {
         "qml/FileIcon.qml",
         "qml/JobsPanel.qml",
         "qml/ConflictDialog.qml",
+        "qml/PreviewPane.qml",
+        "qml/BulkRenameDialog.qml",
+        "qml/SearchBar.qml",
     ]);
 
     // SAFETY: only adds a language-standard flag; no other cc settings are touched.
@@ -29,6 +32,9 @@ fn main() {
             "src/clipboard_bridge.rs",
             "src/folder_view_controller.rs",
             "src/operations_controller.rs",
+            "src/preview_controller.rs",
+            "src/quick_look_bridge.rs",
+            "src/bulk_rename_controller.rs",
         ])
         .cpp_files([
             "cpp/entry_list_model.h",
@@ -39,8 +45,20 @@ fn main() {
             "cpp/job_list_model.cpp",
             "cpp/clipboard.cpp",
             "cpp/bootstrap.cpp",
+            quick_look_source(),
         ])
         .build();
+}
+
+/// Quick Look exists only on macOS; elsewhere a stub answers "unavailable".
+fn quick_look_source() -> &'static str {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo::rustc-link-lib=framework=Quartz");
+        println!("cargo::rustc-link-lib=framework=AppKit");
+        "cpp/quick_look_mac.mm"
+    } else {
+        "cpp/quick_look_other.cpp"
+    }
 }
 
 /// Qt 6.8.3's QtGui metadata asks the linker for `-framework AGL`. macOS 26

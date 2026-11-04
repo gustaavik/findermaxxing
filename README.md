@@ -3,7 +3,10 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 2.** M1 (window, tabs, a lazily loaded live-updating folder view) plus file operations: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and are undoable.
+**Status: milestone 3.**
+- M1: window, tabs, and a lazily loaded, live-updating folder view.
+- M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
+- M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
 
 ## Prerequisites
 
@@ -11,7 +14,7 @@ See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 |---|---|---|
 | Rust | stable via rustup (`rust-toolchain.toml`) | same |
 | C++ | Xcode command line tools | `sudo apt install build-essential libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev` |
-| Qt 6.8.3 | online installer, or `uvx --from aqtinstall aqt install-qt mac desktop 6.8.3 clang_64 -m qtimageformats -O ~/Qt` | `uvx --from aqtinstall aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats -O ~/Qt` (distro Qt ≥ 6.5 also works: `qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls qml6-module-qtquick-layouts qt6-image-formats-plugins`) |
+| Qt 6.8.3 | online installer, or `uvx --from aqtinstall aqt install-qt mac desktop 6.8.3 clang_64 -m qtimageformats qtpdf qtmultimedia -O ~/Qt` | `uvx --from aqtinstall aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats qtpdf qtmultimedia -O ~/Qt` (distro Qt ≥ 6.5 also works: `qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls qml6-module-qtquick-layouts qt6-image-formats-plugins qt6-pdf-dev qml6-module-qtquick-pdf qt6-multimedia-dev qml6-module-qtmultimedia`) |
 | CI tools | `cargo install --locked cargo-deny` and `cargo install --locked cargo-about --features cli` | same |
 
 Point cxx-qt at Qt (add it to your shell profile):
@@ -71,6 +74,17 @@ cargo run -p app --release
 - **Open:** double-click or `Cmd/Ctrl+Down` on a file opens it in its default app.
 - **Context menu:** right-click on items or on empty space.
 
+## Manually testing M3
+
+- **Preview pane:** the *Preview* button or `Cmd/Ctrl+Shift+P`. Arrow through a folder of photos, PDFs, code, zips and audio or video; the pane follows the current item.
+- **Quick Look (macOS):** select items and press `Space` (Space again closes). On Linux, Space toggles the pane.
+- **Search:** `Cmd/Ctrl+F`, then type. Results from all subfolders stream in, with a Folder column. Narrow them with Kind, Date and Size. `Esc` or *Done* returns to the folder. Search a big tree such as `~/Documents` to watch the folder counter.
+- **Saved searches:** *Save…* names the current search; *Saved ▾* runs it again from anywhere, or deletes it. Saved searches survive restarts (`~/Library/Application Support/FinderMaxxing/metadata.sqlite3`).
+- **Bulk rename:** select several items and press `Return` (macOS) or `F2`, or right-click and choose *Rename N Items…*.
+  - Try Replace with regex `(\d{4})-(\d{2})-(\d{2})` → `$3.$2.$1`, or Format "Trip", start 1, 2 digits.
+  - Problems show in red and those items are skipped.
+  - `Cmd/Ctrl+Z` undoes the whole batch.
+
 ## Layout
 
 ```
@@ -79,8 +93,11 @@ crates/
   application/            ports (Lister, Watcher, Clock, ProviderFactory) + use cases + in-memory fakes
   vfs-contract-tests/     Liskov contract every provider must pass
   adapter-local-fs/       file:// provider: listing, watching, copy/move/remove, platform trash, launcher
+  adapter-preview/        syntax highlighting (syntect) and archive listings (zip, tar)
+  adapter-sqlite-store/   metadata store (SQLite): saved searches
   adapter-tokio-runtime/  Clock on tokio
-  presentation/           cxx-qt controllers (folder view, operations), C++ list/job models, clipboard shim, QML
+  presentation/           cxx-qt controllers (folder view, operations, preview, bulk rename), C++ models,
+                          clipboard and Quick Look shims, QML
   app/                    composition root (the `findermaxxing` binary)
   arch-tests/             fails CI if layers point the wrong way
 xtask/                    cargo xtask ci | licenses

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use domain::{
     ByteSize, Capabilities, Capability, ChangeEvent, Conflict, ConflictResolution, EntryBatch, EntryKind,
-    EntryMetadata, FileEntry, JobProgress, LIST_BATCH_SIZE, MountId, PathSegment, Scheme, StoragePath, TrashTicket,
-    VfsError, Visibility,
+    EntryMetadata, FileEntry, JobProgress, LIST_BATCH_SIZE, MountId, PathSegment, SavedSearch, SavedSearchId, Scheme,
+    StoragePath, TrashTicket, VfsError, Visibility,
 };
 use futures::FutureExt;
 use futures::channel::mpsc;
@@ -17,8 +17,10 @@ use futures::stream::{self, Stream};
 
 use crate::cancel::CancelToken;
 use crate::ports::{
-    Clock, ConflictResolver, Copier, FolderMaker, JobObserver, Launcher, Lister, MountHandle, Mover, ProgressCallback,
-    ProviderFactory, Remover, Trasher, Watcher,
+    ArchiveInspector, ArchiveItem, ArchiveListing, Clock, ConflictResolver, Copier, FolderMaker, JobObserver, Launcher,
+    Lister, LocalFile, Materializer, MountHandle, Mover, NewSavedSearch, PreviewFailure, PreviewTheme,
+    ProgressCallback, ProviderFactory, Remover, RenderedText, SavedSearchStore, StoreError, TextRenderer, Trasher,
+    Watcher,
 };
 
 pub const FAKE_SCHEME: &str = "fake";
@@ -375,6 +377,16 @@ impl Launcher for FakeVfs {
     }
 }
 
+/// Fake items have no real local file; previews get a path that names the item.
+pub const FAKE_LOCAL_ROOT: &str = "/fake-local";
+
+impl Materializer for FakeVfs {
+    async fn local_file(&self, item: &StoragePath) -> Result<LocalFile, VfsError> {
+        self.node(item)?;
+        Ok(LocalFile::new(std::path::PathBuf::from(format!("{FAKE_LOCAL_ROOT}{}", item.path_string()))))
+    }
+}
+
 #[derive(Debug)]
 struct FakeFactory {
     fake: FakeVfs,
@@ -398,7 +410,8 @@ impl ProviderFactory for FakeFactory {
             .remover(fake.clone())
             .folder_maker(fake.clone())
             .trasher(fake.clone())
-            .launcher(fake)
+            .launcher(fake.clone())
+            .materializer(fake)
             .build())
     }
 }
@@ -457,6 +470,62 @@ impl ConflictResolver for ScriptedResolver {
         let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
         let answer = if answers.len() > 1 { answers.remove(0) } else { answers[0] };
         future::ready(answer).boxed()
+    }
+}
+
+/// Renders every file as `<pre>name</pre>`; files ending in `.bin` count as binary.
+#[derive(Debug, Default)]
+pub struct StubTextRenderer;
+
+impl TextRenderer for StubTextRenderer {
+    fn render(
+        &self,
+        file: &LocalFile,
+        _theme: PreviewTheme,
+    ) -> BoxFuture<'static, Result<Option<RenderedText>, PreviewFailure>> {
+        let path = file.path().display().to_string();
+        let binary = path.ends_with(".bin");
+        let text =
+            RenderedText { html: format!("<pre>{path}</pre>"), language: "Plain Text".to_owned(), truncated: false };
+        future::ready(Ok((!binary).then_some(text))).boxed()
+    }
+}
+
+/// Lists one entry named after the archive.
+#[derive(Debug, Default)]
+pub struct StubArchiveInspector;
+
+impl ArchiveInspector for StubArchiveInspector {
+    fn list(&self, file: &LocalFile, _limit: usize) -> BoxFuture<'static, Result<ArchiveListing, PreviewFailure>> {
+        let item = ArchiveItem { path: file.path().display().to_string(), size: None, is_folder: false };
+        future::ready(Ok(ArchiveListing { items: vec![item], truncated: false })).boxed()
+    }
+}
+
+/// Saved searches in memory, ids counting up from 1.
+#[derive(Debug, Default)]
+pub struct InMemorySavedSearches {
+    searches: Mutex<Vec<SavedSearch>>,
+}
+
+impl SavedSearchStore for InMemorySavedSearches {
+    fn list(&self) -> BoxFuture<'static, Result<Vec<SavedSearch>, StoreError>> {
+        let mut all = self.searches.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        future::ready(Ok(all)).boxed()
+    }
+
+    fn save(&self, search: NewSavedSearch) -> BoxFuture<'static, Result<SavedSearch, StoreError>> {
+        let mut searches = self.searches.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = SavedSearchId(searches.iter().map(|s| s.id.0).max().unwrap_or_default() + 1);
+        let saved = SavedSearch { id, name: search.name, scope: search.scope, query: search.query };
+        searches.push(saved.clone());
+        future::ready(Ok(saved)).boxed()
+    }
+
+    fn delete(&self, id: SavedSearchId) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.searches.lock().unwrap_or_else(PoisonError::into_inner).retain(|s| s.id != id);
+        future::ready(Ok(())).boxed()
     }
 }
 

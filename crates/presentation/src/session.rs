@@ -1,18 +1,20 @@
-//! One open folder: lists it, keeps it sorted, applies watcher changes, and
-//! reports model updates. A session is a single task that owns all of its
-//! state; the controller only sends commands and receives events.
+//! One open folder: lists it (or searches below it), keeps it sorted, applies
+//! watcher changes, and reports model updates. A session is a single task
+//! that owns all of its state; the controller only sends commands and
+//! receives events.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use application::use_cases::{ChangeBatch, HiddenFiles, ListRequest};
+use application::use_cases::{ChangeBatch, HiddenFiles, ListRequest, SearchEvent};
 use application::{CancelToken, CancellationSource};
-use domain::{SortSpec, StoragePath, VfsError};
+use domain::{SearchQuery, SortSpec, StoragePath, Timestamp, VfsError};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::row_format::RowContext;
 use crate::services::AppServices;
 use crate::view_model::{ChangeOutcome, DirectoryViewModel, ModelUpdate};
 
@@ -20,11 +22,20 @@ use crate::view_model::{ChangeOutcome, DirectoryViewModel, ModelUpdate};
 /// most this often so the view fills progressively without thrashing.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionMode {
+    /// List the folder and follow its changes.
+    Browse,
+    /// Show everything below the folder that matches.
+    Search(SearchQuery),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SessionConfig {
     pub dir: StoragePath,
     pub hidden: HiddenFiles,
     pub sort: SortSpec,
+    pub mode: SessionMode,
 }
 
 #[derive(Debug)]
@@ -32,6 +43,7 @@ pub(crate) enum SessionEvent {
     Model(Vec<ModelUpdate>),
     Loading(bool),
     Failed(VfsError),
+    SearchProgress { folders_searched: u64, unreadable_folders: u64 },
 }
 
 #[derive(Debug)]
@@ -59,7 +71,12 @@ impl FolderSession {
         let (commands, receiver) = mpsc::unbounded_channel();
         let worker = Worker {
             services: services.clone(),
-            view_model: DirectoryViewModel::new(config.sort),
+            view_model: match &config.mode {
+                SessionMode::Browse => DirectoryViewModel::new(config.sort),
+                SessionMode::Search(_) => {
+                    DirectoryViewModel::with_rows(config.sort, RowContext::SearchIn(config.dir.clone()))
+                }
+            },
             config,
             cancel: cancellation.token(),
             sink,
@@ -94,7 +111,60 @@ struct Worker {
 }
 
 impl Worker {
-    async fn run(mut self, mut commands: mpsc::UnboundedReceiver<SessionCommand>) {
+    async fn run(self, commands: mpsc::UnboundedReceiver<SessionCommand>) {
+        match self.config.mode.clone() {
+            SessionMode::Browse => self.browse(commands).await,
+            SessionMode::Search(query) => self.search(&query, commands).await,
+        }
+    }
+
+    async fn search(mut self, query: &SearchQuery, mut commands: mpsc::UnboundedReceiver<SessionCommand>) {
+        if self.run_search(query).await.is_err() {
+            return;
+        }
+        while let Some(command) = commands.recv().await {
+            let result = match command {
+                SessionCommand::Sort(sort) => {
+                    (self.sink)(SessionEvent::Model(vec![self.view_model.set_sort(sort)]));
+                    Ok(())
+                }
+                SessionCommand::Reload => self.run_search(query).await,
+            };
+            if result.is_err() {
+                return;
+            }
+        }
+    }
+
+    async fn run_search(&mut self, query: &SearchQuery) -> Result<(), Cancelled> {
+        self.view_model.clear();
+        (self.sink)(SessionEvent::Loading(true));
+        let mut events = self.services.search.execute(&self.config.dir, query, now(), self.cancel.clone());
+        let mut throttle = Throttle::default();
+        let mut folders_searched = 0;
+        while let Some(event) = events.next().await {
+            match event {
+                SearchEvent::Matches(found) => self.view_model.add_batch(found),
+                SearchEvent::Progress { folders_searched: count } => folders_searched = count,
+                SearchEvent::Failed(error) => (self.sink)(SessionEvent::Failed(error)),
+                SearchEvent::Finished { folders_searched, unreadable_folders } => {
+                    (self.sink)(SessionEvent::SearchProgress { folders_searched, unreadable_folders });
+                }
+            }
+            if throttle.is_due() {
+                (self.sink)(SessionEvent::Model(vec![self.view_model.snapshot()]));
+                (self.sink)(SessionEvent::SearchProgress { folders_searched, unreadable_folders: 0 });
+            }
+        }
+        if self.cancel.is_cancelled() {
+            return Err(Cancelled);
+        }
+        (self.sink)(SessionEvent::Model(vec![self.view_model.snapshot()]));
+        (self.sink)(SessionEvent::Loading(false));
+        Ok(())
+    }
+
+    async fn browse(mut self, mut commands: mpsc::UnboundedReceiver<SessionCommand>) {
         // Subscribe before listing so changes made during a long listing are not lost.
         let mut changes = self.services.watch_directory.execute(&self.config.dir, self.config.hidden).ok();
         if self.load().await.is_err() {
@@ -142,14 +212,13 @@ impl Worker {
         (self.sink)(SessionEvent::Loading(true));
         let request = ListRequest { dir: self.config.dir.clone(), hidden: self.config.hidden };
         let mut batches = self.services.list_directory.execute(&request, self.cancel.clone());
-        let mut last_publish: Option<Instant> = None;
+        let mut throttle = Throttle::default();
         let outcome = loop {
             match batches.next().await {
                 Some(Ok(batch)) => {
                     self.view_model.add_batch(batch);
-                    if last_publish.is_none_or(|at| at.elapsed() >= PUBLISH_INTERVAL) {
+                    if throttle.is_due() {
                         (self.sink)(SessionEvent::Model(vec![self.view_model.snapshot()]));
-                        last_publish = Some(Instant::now());
                     }
                 }
                 Some(Err(VfsError::Cancelled)) => return Err(Cancelled),
@@ -164,6 +233,27 @@ impl Worker {
         (self.sink)(SessionEvent::Loading(false));
         Ok(())
     }
+}
+
+/// Lets the first event through, then at most one per [`PUBLISH_INTERVAL`].
+#[derive(Debug, Default)]
+struct Throttle {
+    last: Option<Instant>,
+}
+
+impl Throttle {
+    fn is_due(&mut self) -> bool {
+        let due = self.last.is_none_or(|at| at.elapsed() >= PUBLISH_INTERVAL);
+        if due {
+            self.last = Some(Instant::now());
+        }
+        due
+    }
+}
+
+fn now() -> Timestamp {
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+    Timestamp::from_unix_millis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
 
 /// The session was cancelled; the task should end quietly.
@@ -185,22 +275,36 @@ mod tests {
     use application::ProviderRegistry;
     use application::ports::MountResolver;
 
-    use crate::services::FileOperations;
-    use application::testing::{FakeVfs, InstantClock};
-    use application::use_cases::{CoalesceWindow, ListDirectory, WatchDirectory};
+    use crate::services::{FileOperations, SavedSearches};
+    use application::ports::SavedSearchStore;
+    use application::testing::{FakeVfs, InMemorySavedSearches, InstantClock, StubArchiveInspector, StubTextRenderer};
+    use application::use_cases::{CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, WatchDirectory};
 
     const EVENT_DEADLINE: Duration = Duration::from_secs(5);
 
     fn services(fake: &FakeVfs) -> AppServices {
         let registry: Arc<dyn MountResolver> =
             Arc::new(ProviderRegistry::default().with_provider(fake.clone().into_factory()).unwrap());
-        AppServices::new(
-            Arc::new(ListDirectory::new(registry.clone())),
-            Arc::new(WatchDirectory::new(registry.clone(), Arc::new(InstantClock), CoalesceWindow::default())),
-            FileOperations::new(&registry),
-            tokio::runtime::Handle::current(),
-            fake.path("/"),
-        )
+        AppServices {
+            list_directory: Arc::new(ListDirectory::new(registry.clone())),
+            watch_directory: Arc::new(WatchDirectory::new(
+                registry.clone(),
+                Arc::new(InstantClock),
+                CoalesceWindow::default(),
+            )),
+            search: Arc::new(SearchFiles::new(registry.clone())),
+            preview: Arc::new(PreparePreview::new(
+                registry.clone(),
+                Arc::new(StubTextRenderer),
+                Arc::new(StubArchiveInspector),
+            )),
+            saved_searches: SavedSearches::new(
+                &(Arc::new(InMemorySavedSearches::default()) as Arc<dyn SavedSearchStore>),
+            ),
+            operations: FileOperations::new(&registry),
+            runtime: tokio::runtime::Handle::current(),
+            home: fake.path("/"),
+        }
     }
 
     fn recording_sink() -> (EventSink, Arc<Mutex<Vec<SessionEvent>>>) {
@@ -235,7 +339,12 @@ mod tests {
         fake.add_dir("/d");
         fake.add_file("/d/a", 1);
         let (sink, events) = recording_sink();
-        let config = SessionConfig { dir: fake.path("/d"), hidden: HiddenFiles::Hide, sort: SortSpec::default() };
+        let config = SessionConfig {
+            dir: fake.path("/d"),
+            hidden: HiddenFiles::Hide,
+            sort: SortSpec::default(),
+            mode: SessionMode::Browse,
+        };
         let _session = FolderSession::start(&services(&fake), config, sink);
 
         wait_until(&events, |e| matches!(e.last(), Some(SessionEvent::Loading(false)))).await;
@@ -249,10 +358,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn search_mode_streams_matches_from_subfolders() {
+        let fake = FakeVfs::new();
+        fake.add_dir("/d");
+        fake.add_dir("/d/sub");
+        fake.add_file("/d/sub/match-me.txt", 1);
+        fake.add_file("/d/other.txt", 1);
+        let (sink, events) = recording_sink();
+        let query = SearchQuery { text: "match".into(), ..SearchQuery::default() };
+        let config = SessionConfig {
+            dir: fake.path("/d"),
+            hidden: HiddenFiles::Hide,
+            sort: SortSpec::default(),
+            mode: SessionMode::Search(query),
+        };
+        let _session = FolderSession::start(&services(&fake), config, sink);
+        wait_until(&events, |e| matches!(e.last(), Some(SessionEvent::Loading(false)))).await;
+        assert_eq!(last_reset_len(&events.lock().unwrap()), Some(1));
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, SessionEvent::SearchProgress { folders_searched: 2, unreadable_folders: 0 }))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn missing_folder_reports_failure() {
         let fake = FakeVfs::new();
         let (sink, events) = recording_sink();
-        let config = SessionConfig { dir: fake.path("/missing"), hidden: HiddenFiles::Hide, sort: SortSpec::default() };
+        let config = SessionConfig {
+            dir: fake.path("/missing"),
+            hidden: HiddenFiles::Hide,
+            sort: SortSpec::default(),
+            mode: SessionMode::Browse,
+        };
         let _session = FolderSession::start(&services(&fake), config, sink);
         wait_until(&events, |e| e.iter().any(|ev| matches!(ev, SessionEvent::Failed(VfsError::NotFound)))).await;
     }

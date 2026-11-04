@@ -1,0 +1,25 @@
+[package]
+name = "adapter-preview"
+description = "Preview helpers: syntax-highlighted text (syntect) and archive listings (zip, tar)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+syntect.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

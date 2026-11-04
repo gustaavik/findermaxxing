@@ -1,16 +1,24 @@
+mod bulk_rename_entries;
 mod create_folder;
 mod list_directory;
 mod open_entry;
+mod prepare_preview;
 mod rename_entry;
+mod saved_searches;
+mod search_files;
 mod transfer_entries;
 mod trash_entries;
 mod undo_redo;
 mod watch_directory;
 
+pub use bulk_rename_entries::BulkRenameEntries;
 pub use create_folder::CreateFolder;
 pub use list_directory::{HiddenFiles, ListDirectory, ListRequest};
 pub use open_entry::OpenEntry;
+pub use prepare_preview::{ARCHIVE_PREVIEW_LIMIT, PreparePreview, Preview, PreviewBody};
 pub use rename_entry::RenameEntry;
+pub use saved_searches::{DeleteSavedSearch, ListSavedSearches, SaveSearch, UNTITLED_SEARCH};
+pub use search_files::{SearchEvent, SearchFiles};
 pub use transfer_entries::{CopyEntries, MoveEntries, TransferRequest};
 pub use trash_entries::{DeletePermanently, TrashEntries};
 pub use undo_redo::{RedoOperation, UndoOperation};

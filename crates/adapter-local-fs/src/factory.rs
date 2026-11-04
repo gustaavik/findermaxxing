@@ -48,6 +48,7 @@ impl ProviderFactory for LocalFsFactory {
             .remover(fs.clone())
             .folder_maker(fs.clone())
             .launcher(fs.clone())
+            .materializer(fs.clone())
             .trasher(self.trash.clone())
             .build())
     }

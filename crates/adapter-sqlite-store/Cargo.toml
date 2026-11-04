@@ -1,0 +1,24 @@
+[package]
+name = "adapter-sqlite-store"
+description = "Local metadata store (SQLite): saved searches now; index, tags and cache metadata later."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

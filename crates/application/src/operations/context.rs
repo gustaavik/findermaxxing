@@ -30,6 +30,14 @@ impl fmt::Debug for JobContext {
     }
 }
 
+/// For jobs whose progress nobody watches (e.g. a quick bulk rename).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NullObserver;
+
+impl JobObserver for NullObserver {
+    fn progress(&self, _progress: &domain::JobProgress) {}
+}
+
 #[derive(Debug)]
 struct StopOnConflict;
 

@@ -23,6 +23,22 @@ pub(crate) fn to_file_url(path: &StoragePath, local_mount: &MountId) -> Option<S
     Some(url)
 }
 
+/// The `file://` URL of an absolute native path (e.g. a materialised file).
+pub(crate) fn native_file_url(native: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut url = String::from(FILE_URL_PREFIX);
+    let parts: Vec<&[u8]> =
+        native.as_os_str().as_bytes().split(|&b| b == SEPARATOR).filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        url.push(char::from(SEPARATOR));
+    }
+    for part in parts {
+        url.push(char::from(SEPARATOR));
+        percent_encode_into(part, &mut url);
+    }
+    url
+}
+
 /// Parses `file:///a/b` (or `file://localhost/a/b`) into a local location.
 pub(crate) fn from_file_url(url: &str, local_mount: &MountId) -> Option<StoragePath> {
     let rest = url.strip_prefix(FILE_URL_PREFIX)?;
@@ -81,6 +97,11 @@ mod tests {
         let url = to_file_url(&path, &local()).unwrap();
         assert_eq!(url, "file:///Users/me/a%20%23b%3Fc%25%E9");
         assert_eq!(from_file_url(&url, &local()).unwrap(), path);
+    }
+
+    #[test]
+    fn native_paths_become_file_urls() {
+        assert_eq!(native_file_url(std::path::Path::new("/tmp/a b.png")), "file:///tmp/a%20b.png");
     }
 
     #[test]

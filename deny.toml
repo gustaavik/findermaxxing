@@ -7,6 +7,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # bincode 1.x is unmaintained (not vulnerable). syntect uses it only to
+    # decode its own bundled, build-time grammar/theme dumps, never untrusted
+    # input. Revisit when syntect moves off it.
+    { id = "RUSTSEC-2025-0141", reason = "syntect-internal decoding of bundled data only" },
+]
 
 [licenses]
 version = 2

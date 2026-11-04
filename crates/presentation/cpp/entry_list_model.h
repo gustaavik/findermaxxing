@@ -39,6 +39,7 @@ public:
         IsContainerRole,
         IsHiddenRole,
         SelectedRole,
+        FolderTextRole,
     };
     Q_ENUM(Role)
 

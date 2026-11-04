@@ -6,15 +6,17 @@
 
 use std::pin::Pin;
 
+use application::ports::NewSavedSearch;
 use application::use_cases::HiddenFiles;
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::QString;
-use domain::{SortKey, SortOrder, SortSpec, StoragePath};
+use cxx_qt_lib::{QString, QStringList};
+use domain::{SavedSearch, SearchQuery, SortKey, SortOrder, SortSpec, StoragePath};
 
 use crate::error_messages::user_message;
 use crate::history::History;
+use crate::search_options;
 use crate::services::AppServices;
-use crate::session::{EventSink, FolderSession, SessionConfig, SessionEvent};
+use crate::session::{EventSink, FolderSession, SessionConfig, SessionEvent, SessionMode};
 use crate::view_model::ModelUpdate;
 
 #[cxx_qt::bridge]
@@ -22,6 +24,9 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+
+        include!("cxx-qt-lib/qstringlist.h");
+        type QStringList = cxx_qt_lib::QStringList;
 
         include!("presentation/src/rows_bridge.cxx.h");
         type EntryRow = crate::rows_bridge::EntryRow;
@@ -59,6 +64,38 @@ pub mod qobject {
         Kind,
     }
 
+    /// Values of the "Kind" search filter.
+    #[qenum(FolderViewController)]
+    enum SearchKind {
+        AnyKind,
+        Folders,
+        Images,
+        Pdfs,
+        Videos,
+        Music,
+        Text,
+        Archives,
+        Documents,
+    }
+
+    #[qenum(FolderViewController)]
+    enum SearchDate {
+        AnyDate,
+        PastDay,
+        PastWeek,
+        PastMonth,
+        PastYear,
+    }
+
+    #[qenum(FolderViewController)]
+    enum SearchSize {
+        AnySize,
+        Small,
+        Medium,
+        Large,
+        Huge,
+    }
+
     #[auto_cxx_name]
     unsafe extern "RustQt" {
         #[qobject]
@@ -77,6 +114,13 @@ pub mod qobject {
         #[qproperty(i32, item_count)]
         #[qproperty(i32, sort_column)]
         #[qproperty(bool, sort_ascending)]
+        #[qproperty(bool, searching)]
+        #[qproperty(QString, search_status)]
+        #[qproperty(QString, search_text)]
+        #[qproperty(i32, search_kind)]
+        #[qproperty(i32, search_date)]
+        #[qproperty(i32, search_size)]
+        #[qproperty(QStringList, saved_search_names)]
         type FolderViewController = super::FolderViewControllerRust;
     }
 
@@ -100,6 +144,25 @@ pub mod qobject {
         fn toggle_hidden_files(self: Pin<&mut FolderViewController>);
         #[qinvokable]
         fn sort_by(self: Pin<&mut FolderViewController>, column: SortColumn);
+        /// Searches below the current folder; an empty query returns to browsing.
+        #[qinvokable]
+        fn search(
+            self: Pin<&mut FolderViewController>,
+            text: &QString,
+            kind: SearchKind,
+            date: SearchDate,
+            size: SearchSize,
+        );
+        #[qinvokable]
+        fn clear_search(self: Pin<&mut FolderViewController>);
+        #[qinvokable]
+        fn save_search(self: Pin<&mut FolderViewController>, name: &QString);
+        #[qinvokable]
+        fn refresh_saved_searches(self: Pin<&mut FolderViewController>);
+        #[qinvokable]
+        fn run_saved_search(self: Pin<&mut FolderViewController>, index: i32);
+        #[qinvokable]
+        fn delete_saved_search(self: Pin<&mut FolderViewController>, index: i32);
 
         /// A file (not a folder) was activated; the window's OperationsController opens it.
         #[qsignal]
@@ -110,7 +173,7 @@ pub mod qobject {
     impl cxx_qt::Initialize for FolderViewController {}
 }
 
-use qobject::{EntryListModel, ServicesHolder, SortColumn};
+use qobject::{EntryListModel, SearchDate, SearchKind, SearchSize, ServicesHolder, SortColumn};
 
 const SCHEME_SEPARATOR: &str = "://";
 const NOT_READY_MESSAGE: &str = "The application is still starting.";
@@ -141,12 +204,22 @@ pub struct FolderViewControllerRust {
     item_count: i32,
     sort_column: i32,
     sort_ascending: bool,
+    searching: bool,
+    search_status: QString,
+    search_text: QString,
+    search_kind: i32,
+    search_date: i32,
+    search_size: i32,
+    saved_search_names: QStringList,
 
     owned_model: cxx::UniquePtr<EntryListModel>,
     history: History,
     session: Option<FolderSession>,
     generation: u64,
     sort: SortSpec,
+    /// The active search, if the view shows search results.
+    query: Option<SearchQuery>,
+    saved: Vec<SavedSearch>,
 }
 
 impl Default for FolderViewControllerRust {
@@ -166,11 +239,20 @@ impl Default for FolderViewControllerRust {
             item_count: 0,
             sort_column: SortColumn::Name.repr,
             sort_ascending: true,
+            searching: false,
+            search_status: QString::default(),
+            search_text: QString::default(),
+            search_kind: SearchKind::AnyKind.repr,
+            search_date: SearchDate::AnyDate.repr,
+            search_size: SearchSize::AnySize.repr,
+            saved_search_names: QStringList::default(),
             owned_model: cxx::UniquePtr::null(),
             history: History::default(),
             session: None,
             generation: 0,
             sort: SortSpec::default(),
+            query: None,
+            saved: Vec::new(),
         }
     }
 }
@@ -245,9 +327,84 @@ impl qobject::FolderViewController {
     pub fn toggle_hidden_files(mut self: Pin<&mut Self>) {
         let show = !*self.show_hidden();
         self.as_mut().set_show_hidden(show);
-        if let Some(current) = self.history.current().cloned() {
-            self.navigate(current, HistoryMode::Skip);
+        let query = self.query.clone().map(|query| search_options::with_hidden(query, show));
+        self.as_mut().rust_mut().query = query;
+        self.restart_session();
+    }
+
+    pub fn search(mut self: Pin<&mut Self>, text: &QString, kind: SearchKind, date: SearchDate, size: SearchSize) {
+        let options = search_options::SearchOptions { text: text.to_string(), kind, date, size };
+        let query = search_options::to_query(&options, *self.show_hidden());
+        if query.is_empty() {
+            return self.clear_search();
         }
+        self.as_mut().set_query(Some(query));
+        self.restart_session();
+    }
+
+    pub fn clear_search(mut self: Pin<&mut Self>) {
+        if self.query.is_some() {
+            self.as_mut().set_query(None);
+            self.restart_session();
+        }
+    }
+
+    pub fn save_search(self: Pin<&mut Self>, name: &QString) {
+        let (Some(services), Some(query), Some(scope)) =
+            (self.app_services(), self.query.clone(), self.history.current().cloned())
+        else {
+            return;
+        };
+        let search = NewSavedSearch { name: name.to_string(), scope, query };
+        let use_case = services.saved_searches.save;
+        let thread = self.qt_thread();
+        services.runtime.spawn(async move {
+            let saved = use_case.execute(search).await;
+            let _ = thread.queue(move |controller| match saved {
+                Ok(_) => controller.refresh_saved_searches(),
+                Err(error) => controller.set_error_message(QString::from(&error.to_string())),
+            });
+        });
+    }
+
+    pub fn refresh_saved_searches(self: Pin<&mut Self>) {
+        let Some(services) = self.app_services() else { return };
+        let use_case = services.saved_searches.list;
+        let thread = self.qt_thread();
+        services.runtime.spawn(async move {
+            let listed = use_case.execute().await;
+            let _ = thread.queue(move |mut controller| match listed {
+                Ok(saved) => {
+                    let names: QStringList = saved.iter().map(|s| QString::from(&s.name)).collect();
+                    controller.as_mut().rust_mut().saved = saved;
+                    controller.set_saved_search_names(names);
+                }
+                Err(error) => controller.set_error_message(QString::from(&error.to_string())),
+            });
+        });
+    }
+
+    pub fn run_saved_search(mut self: Pin<&mut Self>, index: i32) {
+        let Some(saved) = usize::try_from(index).ok().and_then(|i| self.saved.get(i)).cloned() else { return };
+        let Some(services) = self.app_services() else { return };
+        self.as_mut().rust_mut().history.visit(saved.scope.clone());
+        self.as_mut().publish_location(&saved.scope, &services.home);
+        self.as_mut().set_query(Some(saved.query));
+        self.start_session(&services, saved.scope);
+    }
+
+    pub fn delete_saved_search(self: Pin<&mut Self>, index: i32) {
+        let Some(saved) = usize::try_from(index).ok().and_then(|i| self.saved.get(i)).cloned() else { return };
+        let Some(services) = self.app_services() else { return };
+        let use_case = services.saved_searches.delete;
+        let thread = self.qt_thread();
+        services.runtime.spawn(async move {
+            let deleted = use_case.execute(saved.id).await;
+            let _ = thread.queue(move |controller| match deleted {
+                Ok(()) => controller.refresh_saved_searches(),
+                Err(error) => controller.set_error_message(QString::from(&error.to_string())),
+            });
+        });
     }
 
     pub fn sort_by(mut self: Pin<&mut Self>, column: SortColumn) {
@@ -285,13 +442,34 @@ impl qobject::FolderViewController {
         if mode == HistoryMode::Record {
             self.as_mut().rust_mut().history.visit(target.clone());
         }
+        self.as_mut().set_query(None);
         self.as_mut().publish_location(&target, &services.home);
         self.start_session(&services, target);
     }
 
+    /// Records the active search (or browsing) and mirrors it into the properties.
+    fn set_query(mut self: Pin<&mut Self>, query: Option<SearchQuery>) {
+        let options = query.as_ref().map(search_options::from_query).unwrap_or_default();
+        self.as_mut().set_searching(query.is_some());
+        self.as_mut().set_search_text(QString::from(&options.text));
+        self.as_mut().set_search_kind(options.kind.repr);
+        self.as_mut().set_search_date(options.date.repr);
+        self.as_mut().set_search_size(options.size.repr);
+        self.as_mut().set_search_status(QString::default());
+        self.rust_mut().query = query;
+    }
+
+    fn restart_session(self: Pin<&mut Self>) {
+        let Some(services) = self.app_services() else { return };
+        if let Some(current) = self.history.current().cloned() {
+            self.start_session(&services, current);
+        }
+    }
+
     fn start_session(mut self: Pin<&mut Self>, services: &AppServices, dir: StoragePath) {
         let generation = self.generation.wrapping_add(1);
-        let config = SessionConfig { dir, hidden: self.hidden_policy(), sort: self.sort };
+        let mode = self.query.clone().map_or(SessionMode::Browse, SessionMode::Search);
+        let config = SessionConfig { dir, hidden: self.hidden_policy(), sort: self.sort, mode };
         let qt_thread = self.qt_thread();
         let sink: EventSink = Box::new(move |event| {
             // Fails only if the controller is already destroyed; the event is moot then.
@@ -326,6 +504,10 @@ impl qobject::FolderViewController {
             SessionEvent::Model(updates) => self.apply_model_updates(updates),
             SessionEvent::Loading(loading) => self.set_loading(loading),
             SessionEvent::Failed(error) => self.as_mut().set_error_message(QString::from(&user_message(&error))),
+            SessionEvent::SearchProgress { folders_searched, unreadable_folders } => {
+                let status = search_options::status_text(folders_searched, unreadable_folders);
+                self.set_search_status(QString::from(&status));
+            }
         }
     }
 

@@ -14,6 +14,9 @@ pub enum Capability {
     Trash,
     /// Open an item with the system's default application.
     Launch,
+    /// Provide a local file for an item (identity for local disks, a cached
+    /// download for remote providers), used by previews.
+    LocalAccess,
     /// Rename is a single atomic operation (false on S3: copy + delete).
     AtomicRename,
     ServerSideCopy,

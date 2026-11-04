@@ -57,6 +57,8 @@ QVariant EntryListModel::data(const QModelIndex& index, int role) const
         return entry.is_hidden;
     case SelectedRole:
         return bool(m_selected[row]);
+    case FolderTextRole:
+        return toQString(entry.folder_text);
     default:
         return {};
     }
@@ -73,6 +75,7 @@ QHash<int, QByteArray> EntryListModel::roleNames() const
         { IsContainerRole, "isContainer" },
         { IsHiddenRole, "isHidden" },
         { SelectedRole, "selected" },
+        { FolderTextRole, "folderText" },
     };
 }
 

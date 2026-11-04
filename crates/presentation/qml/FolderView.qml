@@ -3,9 +3,10 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import FinderMaxxing
 
-// One folder listing. Layout and input routing only: listing decisions belong
-// to FolderViewController, file operations to the window's OperationsController,
-// and selection state to the list model.
+// One folder listing (or search). Layout and input routing only: listing and
+// search decisions belong to FolderViewController, file operations to the
+// window's OperationsController, previews to PreviewController, and
+// selection state to the list model.
 FocusScope {
     id: root
 
@@ -20,6 +21,11 @@ FocusScope {
     readonly property int modifiedColumnWidth: 170
     readonly property int columnSpacing: 12
     readonly property int sidePadding: 10
+    readonly property int folderColumnWidth: 180
+    readonly property int previewMinimumWidth: 220
+    readonly property int previewPreferredWidth: 340
+    readonly property int searchFieldWidth: 220
+    readonly property int searchDelayMs: 250
     readonly property bool isMac: Qt.platform.os === "osx"
     readonly property string newFolderName: isMac ? qsTr("untitled folder") : qsTr("New Folder")
 
@@ -28,12 +34,19 @@ FocusScope {
     // Locations to select (and for new folders, rename) once the watcher shows them.
     property string pendingSelection: ""
     property bool pendingRename: false
+    property bool previewVisible: false
+    readonly property int appearance: Qt.styleHints.colorScheme === Qt.ColorScheme.Dark
+                                      ? PreviewController.Dark : PreviewController.Light
 
     function selection() {
         return entries.selectedLocations()
     }
 
     function startRename(row) {
+        if (entries.selectedCount > 1 && entries.isSelected(row)) {
+            bulkRename.openFor(selection())
+            return
+        }
         if (row >= 0) {
             list.currentIndex = row
             entries.selectOnly(row)
@@ -46,6 +59,32 @@ FocusScope {
         list.forceActiveFocus()
         if (newName !== oldName) {
             operations.rename(location, newName)
+        }
+    }
+
+    function runSearch() {
+        controller.search(searchField.text, searchBar.kind, searchBar.date, searchBar.size)
+    }
+
+    function endSearch() {
+        searchField.text = ""
+        controller.clearSearch()
+        list.forceActiveFocus()
+    }
+
+    function updatePreview() {
+        if (previewVisible && list.currentIndex >= 0) {
+            preview.show(entries.locationAt(list.currentIndex), appearance)
+        } else if (previewVisible) {
+            preview.clear()
+        }
+        preview.followSelection(selection())
+    }
+
+    function quickLook() {
+        // Quick Look on macOS; elsewhere Space toggles the preview pane.
+        if (!preview.toggleQuickLook(selection())) {
+            previewVisible = !previewVisible
         }
     }
 
@@ -107,6 +146,36 @@ FocusScope {
         target: root.entries
         function onRowsInserted() { root.applyPendingSelection() }
         function onModelReset() { root.applyPendingSelection() }
+        function onSelectionChanged() { root.updatePreview() }
+    }
+
+    Connections {
+        target: controller
+        // Running a saved search fills in its text.
+        function onSearchTextChanged() {
+            if (searchField.text !== controller.searchText) {
+                searchField.text = controller.searchText
+            }
+        }
+    }
+
+    onPreviewVisibleChanged: updatePreview()
+
+    PreviewController {
+        id: preview
+        services: root.services
+    }
+
+    BulkRenameDialog {
+        id: bulkRename
+        services: root.services
+        operations: root.operations
+    }
+
+    Timer {
+        id: searchDelay
+        interval: root.searchDelayMs
+        onTriggered: root.runSearch()
     }
 
     ColumnLayout {
@@ -159,8 +228,48 @@ FocusScope {
                     onClicked: controller.toggleHiddenFiles()
                     Accessible.name: text
                 }
+                ToolButton {
+                    text: qsTr("Preview")
+                    checkable: true
+                    checked: root.previewVisible
+                    onToggled: root.previewVisible = checked
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Show or hide the preview pane")
+                    Accessible.name: qsTr("Preview pane")
+                }
+                TextField {
+                    id: searchField
+                    Layout.preferredWidth: root.searchFieldWidth
+                    placeholderText: qsTr("Search")
+                    selectByMouse: true
+                    Accessible.name: qsTr("Search in %1").arg(controller.title)
+                    onTextEdited: searchDelay.restart()
+                    onAccepted: {
+                        searchDelay.stop()
+                        root.runSearch()
+                    }
+                    Keys.onEscapePressed: root.endSearch()
+                }
             }
         }
+
+        SearchBar {
+            id: searchBar
+            Layout.fillWidth: true
+            visible: controller.searching
+            controller: controller
+            onChanged: root.runSearch()
+            onDone: root.endSearch()
+        }
+
+        SplitView {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            orientation: Qt.Horizontal
+
+        ColumnLayout {
+            SplitView.fillWidth: true
+            spacing: 0
 
         Rectangle {
             Layout.fillWidth: true
@@ -177,6 +286,13 @@ FocusScope {
                     Layout.fillWidth: true
                     label: qsTr("Name")
                     column: FolderViewController.Name
+                }
+                Label {
+                    Layout.preferredWidth: root.folderColumnWidth
+                    visible: controller.searching
+                    text: qsTr("Folder")
+                    elide: Text.ElideRight
+                    Accessible.role: Accessible.ColumnHeader
                 }
                 ColumnHeader {
                     Layout.preferredWidth: root.sizeColumnWidth
@@ -248,6 +364,7 @@ FocusScope {
                 required property bool isContainer
                 required property bool isHidden
                 required property bool selected
+                required property string folderText
 
                 width: ListView.view.width
                 height: root.rowHeight
@@ -300,6 +417,13 @@ FocusScope {
                         }
                     }
                     Label {
+                        Layout.preferredWidth: root.folderColumnWidth
+                        visible: controller.searching
+                        text: row.folderText
+                        elide: Text.ElideMiddle
+                        color: row.highlighted ? palette.highlightedText : palette.placeholderText
+                    }
+                    Label {
                         Layout.preferredWidth: root.sizeColumnWidth
                         text: row.isContainer ? "--" : row.sizeText
                         horizontalAlignment: Text.AlignRight
@@ -347,6 +471,8 @@ FocusScope {
                 }
             }
 
+            onCurrentIndexChanged: root.updatePreview()
+
             Keys.onPressed: event => {
                 const extend = (event.modifiers & Qt.ShiftModifier) !== 0
                 switch (event.key) {
@@ -371,8 +497,15 @@ FocusScope {
                         controller.activate(list.currentIndex)
                     }
                     break
+                case Qt.Key_Space:
+                    root.quickLook()
+                    break
                 case Qt.Key_Escape:
-                    root.entries.clearSelection()
+                    if (controller.searching) {
+                        root.endSearch()
+                    } else {
+                        root.entries.clearSelection()
+                    }
                     break
                 default:
                     return
@@ -388,6 +521,16 @@ FocusScope {
                 visible: controller.errorMessage !== "" || (!controller.loading && list.count === 0)
                 text: controller.errorMessage !== "" ? controller.errorMessage : qsTr("This folder is empty.")
                 color: palette.placeholderText
+            }
+        }
+
+        }
+
+            PreviewPane {
+                visible: root.previewVisible
+                SplitView.minimumWidth: root.previewMinimumWidth
+                SplitView.preferredWidth: root.previewPreferredWidth
+                preview: preview
             }
         }
 
@@ -409,9 +552,11 @@ FocusScope {
                 Label {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
+                    readonly property string items: controller.itemCount === 1
+                                                    ? qsTr("1 item") : qsTr("%1 items").arg(controller.itemCount)
                     text: root.entries.selectedCount > 0
-                          ? qsTr("%1 of %n item(s) selected", "", controller.itemCount).arg(root.entries.selectedCount)
-                          : qsTr("%n item(s)", "", controller.itemCount)
+                          ? qsTr("%1 of %2 selected").arg(root.entries.selectedCount).arg(items)
+                          : items
                     Accessible.name: text
                 }
             }
@@ -435,9 +580,14 @@ FocusScope {
         }
         MenuSeparator {}
         MenuItem {
-            text: qsTr("Rename")
-            enabled: contextMenu.singleSelection
+            text: contextMenu.singleSelection ? qsTr("Rename") : qsTr("Rename %1 Items…").arg(root.entries.selectedCount)
+            enabled: contextMenu.hasSelection
             onTriggered: root.startRename(list.currentIndex)
+        }
+        MenuItem {
+            text: qsTr("Quick Look")
+            enabled: contextMenu.hasSelection
+            onTriggered: root.quickLook()
         }
         MenuItem {
             text: qsTr("Copy")
@@ -606,6 +756,20 @@ FocusScope {
         enabled: root.visible && list.activeFocus
         sequences: ["F2"]
         onActivated: root.startRename(list.currentIndex)
+    }
+    Shortcut {
+        enabled: root.visible
+        sequences: [StandardKey.Find]
+        onActivated: {
+            searchField.forceActiveFocus()
+            searchField.selectAll()
+        }
+    }
+    Shortcut {
+        // Finder: Shift+Cmd+P shows the preview pane.
+        enabled: root.visible
+        sequences: ["Ctrl+Shift+P"]
+        onActivated: root.previewVisible = !root.previewVisible
     }
     Shortcut {
         enabled: root.visible

@@ -8,6 +8,7 @@ use domain::{Action, ByteSize, Operation, Relocation, StoragePath, TrashTicket};
 use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
 use super::progress::ProgressTracker;
+use super::relocate::{needs_staging, rename_batch};
 use super::transfer::move_item;
 use crate::ports::MountResolver;
 
@@ -115,6 +116,11 @@ async fn move_all(
     tracker: &Arc<ProgressTracker>,
     ctx: &JobContext,
 ) -> StepOutcome {
+    if needs_staging(moves) {
+        // E.g. undoing a swap from a bulk rename.
+        let (moved, result) = rename_batch(mounts, moves, tracker, ctx).await;
+        return (Operation::Moved(moved), result);
+    }
     let mut moved = Vec::with_capacity(moves.len());
     for relocation in moves {
         if ctx.cancel.is_cancelled() {

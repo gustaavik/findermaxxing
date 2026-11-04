@@ -14,6 +14,8 @@ pub(crate) mod ffi {
         has_modified: bool,
         is_container: bool,
         is_hidden: bool,
+        /// Where a search result lives, relative to the search scope; empty when browsing.
+        folder_text: String,
     }
 
     /// One running job in the jobs panel.

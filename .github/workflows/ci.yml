@@ -50,7 +50,7 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
-          modules: qtimageformats
+          modules: qtimageformats qtpdf qtmultimedia
           cache: true
       - name: Point cxx-qt at Qt
         run: echo "QMAKE=$(which qmake)" >> "$GITHUB_ENV"
