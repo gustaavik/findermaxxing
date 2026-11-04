@@ -1,6 +1,8 @@
 //! The local cache of remote files and the folders kept available offline.
 
-use domain::{AccountId, ByteSize, FileEntry, MountId, S3Location, ServerLocation, StoragePath, Timestamp};
+use domain::{
+    AccountId, ByteSize, DriveLocation, FileEntry, MountId, S3Location, ServerLocation, StoragePath, Timestamp,
+};
 use futures::future::BoxFuture;
 
 use super::saved_searches::StoreError;
@@ -40,6 +42,7 @@ pub trait CacheIndex: Send + Sync {
 pub enum AccountMounts {
     Server(ServerLocation),
     S3(AccountId),
+    Drive(DriveLocation),
 }
 
 impl AccountMounts {
@@ -48,6 +51,7 @@ impl AccountMounts {
         match self {
             Self::Server(server) => ServerLocation::of(mount) == Some(*server),
             Self::S3(account) => S3Location::of(mount).is_some_and(|location| location.account == *account),
+            Self::Drive(drive) => DriveLocation::of(mount) == Some(*drive),
         }
     }
 }

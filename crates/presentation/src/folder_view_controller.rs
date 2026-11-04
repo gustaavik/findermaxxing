@@ -11,7 +11,8 @@ use application::use_cases::HiddenFiles;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
 use domain::{
-    Capability, S3Location, SavedSearch, SearchQuery, ServerLocation, SortKey, SortOrder, SortSpec, StoragePath,
+    Capability, DriveLocation, S3Location, SavedSearch, SearchQuery, ServerLocation, SortKey, SortOrder, SortSpec,
+    StoragePath,
 };
 
 use crate::error_messages::user_message;
@@ -599,12 +600,17 @@ fn parse_location(text: &str, home: &StoragePath) -> Option<StoragePath> {
 
 /// The folder's name; a bucket root is named after its bucket.
 fn location_title(location: &StoragePath) -> String {
-    match (location.name(), S3Location::of(location.mount()), ServerLocation::of(location.mount())) {
-        (Some(name), _, _) => name.to_string(),
-        (None, Some(bucket), _) => bucket.bucket.to_string(),
-        (None, None, Some(server)) => server.protocol.to_string(),
-        (None, None, None) => ROOT_TITLE.to_owned(),
+    let mount = location.mount();
+    if let Some(name) = location.name() {
+        return name.to_string();
     }
+    if let Some(bucket) = S3Location::of(mount) {
+        return bucket.bucket.to_string();
+    }
+    if let Some(server) = ServerLocation::of(mount) {
+        return server.protocol.to_string();
+    }
+    DriveLocation::of(mount).map_or_else(|| ROOT_TITLE.to_owned(), |drive| drive.provider.to_string())
 }
 
 /// Bare paths on the home mount, `bucket/path` in S3, full locations otherwise.

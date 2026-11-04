@@ -1,5 +1,5 @@
 //! SQLite-backed metadata store. Implements `SavedSearchStore`,
-//! `AccountStore` and `ServerAccountStore` (settings only: secrets live in
+//! `AccountStore`, `ServerAccountStore` and `DriveAccountStore` (settings only: secrets live in
 //! the OS keychain), `FavoritesStore`, `PinStore`, `CacheIndex` and
 //! `TransferJournal`.
 //!
@@ -8,6 +8,7 @@
 
 mod accounts;
 mod cache;
+mod drives;
 mod favorites;
 mod journal;
 mod location_codec;
@@ -90,6 +91,12 @@ const MIGRATIONS: &[&str] = &[
         sources TEXT NOT NULL,
         destination TEXT NOT NULL,
         in_flight TEXT
+    );",
+    "CREATE TABLE drive_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL
     );",
 ];
 

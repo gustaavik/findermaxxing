@@ -1,6 +1,7 @@
 # Architecture
 
-Dependencies point inward. `crates/arch-tests` fails the build if they don't (ADR 0001).
+Dependencies point inward. `crates/arch-tests` fails the build if they don't (ADR 0001). Adapters may also use
+the shared `infra-*` tier (OAuth and authenticated HTTP, ADR 0023), but never each other.
 
 ```mermaid
 flowchart RL
@@ -18,6 +19,10 @@ flowchart RL
     sftp["adapter-sftp<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
     webdav["adapter-webdav<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
     smb["adapter-smb<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
+    oauth["infra-oauth<br/><i>PKCE + loopback sign-in, TokenSource,<br/>ApiClient (shared by drive adapters)</i>"] --> application
+    gdrive["adapter-gdrive<br/><i>Lister, Reader, Writer, Copier, Mover, Remover,<br/>FolderMaker, Trasher, DriveConnector</i>"] --> oauth
+    dropbox["adapter-dropbox<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, DriveConnector</i>"] --> oauth
+    onedrive["adapter-onedrive<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, DriveConnector</i>"] --> oauth
     s3["adapter-s3<br/><i>Lister, Copier, Mover, Remover, FolderMaker,<br/>Reader, Writer, MetadataEditor,<br/>Presigner, VersionLister, S3Connector</i>"] --> application
     keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
@@ -33,10 +38,13 @@ flowchart RL
     app --> sftp
     app --> webdav
     app --> smb
+    app --> gdrive
+    app --> dropbox
+    app --> onedrive
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M5a)
+## Ports and their implementations (M1–M5b)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -57,6 +65,8 @@ flowchart RL
 | `Writer::resume`/`discard`, `WriteSink::checkpoint`, `Reader::read_from` | `LocalFs`, `BucketFs` (ListParts), `SftpFs`, `SmbFs`, `FakeVfs` (WebDAV: not resumable) | `resume_contract_tests!` (2 cases) for each; `application/tests/resume_servers_offline.rs` |
 | `Lister`, `Copier`, `Mover`, `Remover`, `FolderMaker` on servers | `adapter_sftp::SftpFs`, `adapter_webdav::DavFs`, `adapter_smb::SmbFs` | `adapter-{sftp,webdav,smb}/tests/*_contract.rs` against OpenSSH, Apache `mod_dav` and Samba in Docker (32, 30 and 32 cases) |
 | `ServerConnector`, `ServerAccountStore` | `SftpService`, `WebDavService`, `SmbService`; `SqliteStore`; `testing::{FakeServerConnector, InMemoryServers}` | host-key and sign-in cases in each contract file; `resume_servers_offline.rs`; `adapter-sqlite-store/tests/servers_cache_journal.rs` |
+| Roles on cloud drives | `adapter_gdrive::DriveFs`, `adapter_dropbox::DropboxFs`, `adapter_onedrive::OneDriveFs` | `adapter-{gdrive,dropbox,onedrive}/tests/*_contract.rs` against `mock-cloud` (39, 33 and 33 cases, run by `cargo test`); `live_round_trip` (ignored) against the real services |
+| `DriveConnector`, `DriveAccountStore`, `UrlOpener` | the three drive services; `SqliteStore`; `LocalOpener`; `testing::{FakeDriveConnector, InMemoryDrives}` | sign-in cases in each contract file; `application/tests/drives.rs`; `servers_cache_journal.rs` |
 | `TransferJournal` | `SqliteStore`, `testing::InMemoryJournal` | `servers_cache_journal.rs` (survives reopen); `resume_servers_offline.rs` |
 | `CacheIndex`, `PinStore`, `CacheJanitor` | `SqliteStore`, `adapter_file_cache::FileCache`; `testing::{InMemoryCacheIndex, InMemoryPins, RecordingJanitor}` | `adapter-file-cache/tests/cache.rs` (freshness, LRU eviction with pins, offline browsing, forgetting an account); `domain::cache` unit tests |
 | `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |

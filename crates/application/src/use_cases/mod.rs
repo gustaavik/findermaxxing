@@ -1,5 +1,6 @@
 mod bulk_rename_entries;
 mod create_folder;
+mod drives;
 mod item_details;
 mod list_directory;
 mod offline;
@@ -18,6 +19,7 @@ mod watch_directory;
 
 pub use bulk_rename_entries::BulkRenameEntries;
 pub use create_folder::CreateFolder;
+pub use drives::{AddDrive, ConnectDrive, DriveError, DriveServices, ListDrives, RemoveDrive};
 pub use item_details::{
     CreateShareLink, GetItemProperties, ListItemVersions, MAX_SHARE_LINK_VALIDITY, UpdateItemProperties,
 };

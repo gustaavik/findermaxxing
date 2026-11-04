@@ -3,10 +3,11 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 5a** (M5 is split: M5b adds Google Drive, Dropbox and OneDrive).
+**Status: milestone 5** (5a and 5b).
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
+- M5b: Google Drive, Dropbox and OneDrive, signed in through the browser (OAuth + PKCE), with Google Docs exported to Office formats. Needs OAuth client IDs: [docs/oauth-setup.md](docs/oauth-setup.md).
 - M5a: SFTP, WebDAV and SMB servers; iCloud Drive and other synced cloud folders under Locations; a size-limited cache with *Keep Available Offline*; transfers that resume after a quit or crash; drag and drop with other apps.
 - M4: S3 and S3-compatible storage (AWS, R2, B2, Wasabi, MinIO, SeaweedFS) in a unified sidebar with places and favorites. Copy and move stream between providers, transfers that may cost money ask first, and secrets live in the OS keychain.
 
@@ -149,6 +150,25 @@ Start the three servers above, then `cargo run -p app --release`.
 - **Cloud folders:** iCloud Drive and any Google Drive, OneDrive or Dropbox desktop folders appear under *Locations*.
 - **Remove a server:** right-click → *Remove Server…*. The keychain item, cached copies and offline pins go with it.
 
+## Manually testing M5b
+
+Without real accounts, against the local API doubles:
+
+```sh
+cargo run -p mock-cloud --bin mock-cloud-server               # prints FM_DEV_CLOUD_MOCK=http://127.0.0.1:<port>
+FM_DEV_CLOUD_MOCK=http://127.0.0.1:<port> cargo run -p app    # debug build
+```
+
+- *Add Cloud Storage…* → **Google Drive** → *Sign In with Browser…*. With the mock, the sign-in completes at once. Do the same for Dropbox and OneDrive. Each appears under *Cloud Storage* with its user's email.
+- **Google Drive:**
+  - The two `notes.txt` files show as `notes.txt` and `notes (2).txt`; each opens its own content.
+  - `Budget` shows as `Budget.xlsx`; opening exports it.
+  - *Move to Trash* works and undo restores.
+- Copy, paste, drag and drop between the drives, local folders and servers. Big files resume after a quit, as in M5a.
+- *Remove Account…* forgets the sign-in and any offline copies.
+
+With real accounts: register the apps and build with the IDs as described in [docs/oauth-setup.md](docs/oauth-setup.md), then *Sign In with Browser…* opens the provider's own page. Run each adapter's `live_round_trip` test too.
+
 ## Layout
 
 ```
@@ -163,6 +183,11 @@ crates/
   adapter-file-cache/     size-limited cache of remote files, offline pins and listings (decorates any provider)
   adapter-sftp/           sftp:// provider (russh): host-key trust, agent/key/password, resumable writes
   adapter-webdav/         dav:// provider (reqwest + rustls): Nextcloud, ownCloud, NAS, Apache
+  adapter-gdrive/         gdrive:// provider (Drive API v3): duplicates, Docs export, Trash, resumable uploads
+  adapter-dropbox/        dropbox:// provider (API v2): upload sessions resumed from Dropbox's offset
+  adapter-onedrive/       onedrive:// provider (Microsoft Graph): pre-authorised upload sessions, async copies
+  infra-oauth/            shared by the drive adapters: OAuth 2.0 + PKCE loopback sign-in, token refresh, ApiClient
+  mock-cloud/             test doubles of the three APIs and an OAuth server (tests and mock-cloud-server only)
   adapter-smb/            smb:// provider (pure-Rust smb2): Windows and NAS shares, resumable writes
   adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal
   adapter-tokio-runtime/  Clock on tokio

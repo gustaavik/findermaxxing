@@ -128,11 +128,14 @@ macro_rules! resume_contract_tests {
 /// More than two S3 parts, so a resumed upload has whole parts to keep.
 const RESUME_PAYLOAD: usize = 20 * 1024 * 1024;
 
-async fn checkpointed_partial_write<F: VfsFixture>(fixture: &F, name: &str, payload: &[u8]) -> ResumeState
+/// Writes `payload`, the first part of a file of `total` bytes, then drops
+/// the sink as a quit would. `total` is the size hint, as the transfer
+/// engine always knows the source's size.
+async fn checkpointed_partial_write<F: VfsFixture>(fixture: &F, name: &str, payload: &[u8], total: usize) -> ResumeState
 where
     F::Vfs: Writer,
 {
-    let mut sink = fixture.vfs().create(&child(fixture, name), Some(ByteSize(payload.len() as u64))).await.unwrap();
+    let mut sink = fixture.vfs().create(&child(fixture, name), Some(ByteSize(total as u64))).await.unwrap();
     for chunk in payload.chunks(WRITE_CHUNK) {
         sink.write(chunk.to_vec()).await.unwrap();
     }
@@ -147,7 +150,7 @@ where
 {
     let payload: Vec<u8> = (0..RESUME_PAYLOAD).map(|i| (i % 249) as u8).collect();
     let written = &payload[..RESUME_PAYLOAD * 3 / 4];
-    let state = checkpointed_partial_write(fixture, "resumed.bin", written).await;
+    let state = checkpointed_partial_write(fixture, "resumed.bin", written, payload.len()).await;
     assert_eq!(fixture.read_file("resumed.bin").await, None, "a partial write is never visible");
 
     let ResumedSink { mut sink, offset } = fixture.vfs().resume(&child(fixture, "resumed.bin"), &state).await.unwrap();
@@ -165,7 +168,7 @@ where
     F::Vfs: Writer,
 {
     let payload = vec![7_u8; RESUME_PAYLOAD / 2];
-    let state = checkpointed_partial_write(fixture, "discarded.bin", &payload).await;
+    let state = checkpointed_partial_write(fixture, "discarded.bin", &payload, RESUME_PAYLOAD).await;
     let target = child(fixture, "discarded.bin");
     fixture.vfs().discard(&target, &state).await.unwrap();
     fixture.vfs().discard(&target, &state).await.unwrap();

@@ -1,0 +1,26 @@
+[package]
+name = "adapter-gdrive"
+description = "gdrive:// provider: Google Drive API v3 (OAuth via infra-oauth), duplicate names disambiguated, Google Docs exported to Office formats, resumable uploads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+infra-oauth.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+reqwest.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+application = { workspace = true, features = ["testing"] }
+vfs-contract-tests.workspace = true
+mock-cloud.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

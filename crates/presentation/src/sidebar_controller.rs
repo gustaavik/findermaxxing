@@ -12,12 +12,12 @@ use application::use_cases::{AccountError, ServerError};
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
 use domain::{
-    AccountId, Addressing, BucketName, HostKey, HostTrust, PathSegment, S3Account, S3Auth, S3Location, ServerAccount,
-    ServerAuth, ServerLocation, ServerProtocol, StoragePath, Transport,
+    AccountId, Addressing, BucketName, DriveAccount, DriveLocation, DriveProvider, HostKey, HostTrust, PathSegment,
+    S3Account, S3Auth, S3Location, ServerAccount, ServerAuth, ServerLocation, ServerProtocol, StoragePath, Transport,
 };
 use futures::future::join_all;
 
-use crate::error_messages::server_message;
+use crate::error_messages::{drive_message, server_message};
 
 use crate::rows_bridge::SidebarRow;
 use crate::services::AppServices;
@@ -60,6 +60,14 @@ pub mod qobject {
         Account,
         Bucket,
         Server,
+        Drive,
+    }
+
+    #[qenum(SidebarController)]
+    enum DriveKind {
+        GoogleDrive,
+        Dropbox,
+        OneDrive,
     }
 
     #[qenum(SidebarController)]
@@ -108,6 +116,8 @@ pub mod qobject {
         #[qproperty(QString, server_error)]
         /// Set while a new SSH server's key waits for the user: algorithm and fingerprint.
         #[qproperty(QString, host_key_prompt)]
+        /// A browser sign-in is waiting for the user to come back.
+        #[qproperty(bool, signing_in)]
         type SidebarController = super::SidebarControllerRust;
     }
 
@@ -144,6 +154,13 @@ pub mod qobject {
         fn remove_server(self: Pin<&mut SidebarController>, account_id: i64);
         #[qinvokable]
         fn reconnect_server(self: Pin<&mut SidebarController>, account_id: i64);
+        /// Opens the provider's sign-in page in the browser and waits.
+        #[qinvokable]
+        fn add_drive(self: Pin<&mut SidebarController>, kind: DriveKind);
+        #[qinvokable]
+        fn cancel_sign_in(self: Pin<&mut SidebarController>);
+        #[qinvokable]
+        fn remove_drive(self: Pin<&mut SidebarController>, account_id: i64);
 
         #[qsignal]
         fn account_added(self: Pin<&mut SidebarController>);
@@ -155,7 +172,7 @@ pub mod qobject {
     impl cxx_qt::Initialize for SidebarController {}
 }
 
-use qobject::{AuthMode, RowKind, Security, ServerKind, ServicesHolder, SidebarModel, SignIn, UrlStyle};
+use qobject::{AuthMode, DriveKind, RowKind, Security, ServerKind, ServicesHolder, SidebarModel, SignIn, UrlStyle};
 
 const FAVORITES_HEADING: &str = "Favorites";
 const LOCATIONS_HEADING: &str = "Locations";
@@ -168,6 +185,8 @@ const STANDARD_FOLDERS: &[&str] = &["Desktop", "Documents", "Downloads"];
 const NO_BUCKETS: &str = "No buckets";
 const INVALID_BUCKET_MESSAGE: &str = "Bucket names use 3–63 lowercase letters, digits, dots and hyphens.";
 
+// The bools are Q_PROPERTY storage, which cxx-qt requires as plain fields.
+#[allow(clippy::struct_excessive_bools, reason = "mirrors Qt properties one-to-one")]
 pub struct SidebarControllerRust {
     services: *mut ServicesHolder,
     model: *mut SidebarModel,
@@ -186,6 +205,9 @@ pub struct SidebarControllerRust {
     server_errors: HashMap<AccountId, String>,
     /// A server waiting for its host key to be confirmed.
     pending_server: Option<PendingServer>,
+    signing_in: bool,
+    sign_in: Option<application::CancellationSource>,
+    drive_errors: HashMap<AccountId, String>,
 }
 
 struct PendingServer {
@@ -209,6 +231,9 @@ impl Default for SidebarControllerRust {
             host_key_prompt: QString::default(),
             server_errors: HashMap::new(),
             pending_server: None,
+            signing_in: false,
+            sign_in: None,
+            drive_errors: HashMap::new(),
         }
     }
 }
@@ -230,6 +255,7 @@ pub(crate) struct SidebarData {
     pub volumes: Vec<Volume>,
     pub accounts: Vec<(S3Account, Result<Vec<BucketInfo>, String>)>,
     pub servers: Vec<ServerAccount>,
+    pub drives: Vec<DriveAccount>,
 }
 
 impl qobject::SidebarController {
@@ -243,14 +269,18 @@ impl qobject::SidebarController {
             // never keep Home and Favorites out of the sidebar.
             let mut data = gather_places(&services).await;
             data.servers = services.servers.list.execute().await.unwrap_or_default();
+            data.drives = services.drives.list.execute().await.unwrap_or_default();
             let local = SidebarData { accounts: Vec::new(), ..data.clone() };
             let _ = thread.queue(move |controller| controller.publish(&local));
-            let (errors, server_errors) = if connect_first {
-                let (accounts, servers) =
-                    futures::join!(connect_saved(&services), connect_servers(&services, &data.servers));
-                (accounts, Some(servers))
+            let (errors, server_errors, drive_errors) = if connect_first {
+                let (accounts, servers, drives) = futures::join!(
+                    connect_saved(&services),
+                    connect_servers(&services, &data.servers),
+                    connect_drives(&services, &data.drives)
+                );
+                (accounts, Some(servers), Some(drives))
             } else {
-                (None, None)
+                (None, None, None)
             };
             data.accounts = gather_accounts(&services).await;
             let _ = thread.queue(move |mut controller| {
@@ -259,6 +289,9 @@ impl qobject::SidebarController {
                 }
                 if let Some(errors) = server_errors {
                     controller.as_mut().rust_mut().server_errors = errors;
+                }
+                if let Some(errors) = drive_errors {
+                    controller.as_mut().rust_mut().drive_errors = errors;
                 }
                 controller.publish(&data);
             });
@@ -458,6 +491,62 @@ impl qobject::SidebarController {
         });
     }
 
+    pub fn add_drive(mut self: Pin<&mut Self>, kind: DriveKind) {
+        let Some(services) = self.app_services() else { return };
+        if self.signing_in {
+            return;
+        }
+        let provider = match kind {
+            DriveKind::Dropbox => DriveProvider::Dropbox,
+            DriveKind::OneDrive => DriveProvider::OneDrive,
+            DriveKind::GoogleDrive | DriveKind { .. } => DriveProvider::GoogleDrive,
+        };
+        let cancellation = application::CancellationSource::new();
+        let token = cancellation.token();
+        self.as_mut().rust_mut().sign_in = Some(cancellation);
+        self.as_mut().set_account_error(QString::default());
+        self.as_mut().set_signing_in(true);
+        let (use_case, thread) = (services.drives.add.clone(), self.qt_thread());
+        services.runtime.spawn(async move {
+            let added = use_case.execute(provider, token).await;
+            let _ = thread.queue(move |mut controller| {
+                controller.as_mut().rust_mut().sign_in = None;
+                controller.as_mut().set_signing_in(false);
+                match added {
+                    Ok(_) => {
+                        controller.as_mut().account_added();
+                        controller.refresh();
+                    }
+                    Err(error) => {
+                        if let Some(message) = drive_message(&error) {
+                            controller.set_account_error(QString::from(&message));
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    pub fn cancel_sign_in(mut self: Pin<&mut Self>) {
+        if let Some(cancellation) = self.as_mut().rust_mut().sign_in.take() {
+            cancellation.cancel();
+        }
+    }
+
+    pub fn remove_drive(self: Pin<&mut Self>, account_id: i64) {
+        let Some(services) = self.app_services() else { return };
+        let (list, remove, forget) = (services.drives.list, services.drives.remove, services.offline.forget_account);
+        self.run_then_refresh(async move {
+            let drives = list.execute().await.map_err(|e| e.to_string())?;
+            let Some(drive) = drives.into_iter().find(|d| d.id == AccountId(account_id)) else { return Ok(()) };
+            remove.execute(&drive).await.map_err(|e| drive_message(&e).unwrap_or_default())?;
+            let location = DriveLocation { provider: drive.provider, account: drive.id };
+            // The account is gone either way; leftovers are evicted later.
+            let _ = forget.execute(AccountMounts::Drive(location)).await;
+            Ok(())
+        });
+    }
+
     fn run_then_refresh(self: Pin<&mut Self>, work: impl Future<Output = Result<(), String>> + Send + 'static) {
         let Some(services) = self.app_services() else { return };
         let thread = self.qt_thread();
@@ -484,6 +573,7 @@ impl qobject::SidebarController {
             let errors = match row.kind {
                 kind if kind == RowKind::Account.repr => &self.connect_errors,
                 kind if kind == RowKind::Server.repr => &self.server_errors,
+                kind if kind == RowKind::Drive.repr => &self.drive_errors,
                 _ => continue,
             };
             if let Some(error) = errors.get(&AccountId(row.account_id)) {
@@ -516,10 +606,26 @@ async fn connect_servers(services: &AppServices, servers: &[ServerAccount]) -> H
     join_all(attempts).await.into_iter().filter_map(|(id, error)| Some((id, error?))).collect()
 }
 
+/// Connects every drive at once; returns why each failing one failed.
+async fn connect_drives(services: &AppServices, drives: &[DriveAccount]) -> HashMap<AccountId, String> {
+    let attempts = drives.iter().map(|drive| async {
+        let result = services.drives.connect.execute(drive).await;
+        (drive.id, result.err().and_then(|error| drive_message(&error)))
+    });
+    join_all(attempts).await.into_iter().filter_map(|(id, error)| Some((id, error?))).collect()
+}
+
 async fn gather_places(services: &AppServices) -> SidebarData {
     let favorites = services.places.favorites.execute().await.unwrap_or_default();
     let volumes = services.places.volumes.execute().await;
-    SidebarData { home: services.home.clone(), favorites, volumes, accounts: Vec::new(), servers: Vec::new() }
+    SidebarData {
+        home: services.home.clone(),
+        favorites,
+        volumes,
+        accounts: Vec::new(),
+        servers: Vec::new(),
+        drives: Vec::new(),
+    }
 }
 
 async fn gather_accounts(services: &AppServices) -> Vec<(S3Account, Result<Vec<BucketInfo>, String>)> {
@@ -621,8 +727,15 @@ pub(crate) fn sidebar_rows(data: &SidebarData) -> Vec<SidebarRow> {
     }
     rows.push(row(RowKind::Place, COMPUTER_LABEL, Some(&StoragePath::root(data.home.mount().clone())), "drive"));
     rows.extend(data.volumes.iter().map(|v| row(RowKind::Place, &v.name, Some(&v.location), "drive")));
-    if !data.accounts.is_empty() {
+    if !data.accounts.is_empty() || !data.drives.is_empty() {
         rows.push(row(RowKind::Heading, CLOUD_HEADING, None, ""));
+    }
+    for drive in &data.drives {
+        let Ok(mount) = drive.mount() else { continue };
+        let mut line = row(RowKind::Drive, &drive.name, Some(&StoragePath::root(mount)), "cloud");
+        line.account_id = drive.id.0;
+        line.detail.clone_from(&drive.email);
+        rows.push(line);
     }
     for (account, buckets) in &data.accounts {
         rows.extend(account_rows(account, buckets));
@@ -698,6 +811,12 @@ mod tests {
                 root: String::new(),
                 auth: ServerAuth::Agent,
             }],
+            drives: vec![DriveAccount {
+                id: AccountId(9),
+                provider: DriveProvider::GoogleDrive,
+                name: "Google Drive".into(),
+                email: "me@gmail.com".into(),
+            }],
         };
         let rows = sidebar_rows(&data);
         let labels: Vec<(&str, &str)> = rows.iter().map(|r| (r.label.as_str(), r.detail.as_str())).collect();
@@ -714,6 +833,7 @@ mod tests {
                 ("Computer", ""),
                 ("USB", ""),
                 ("Cloud Storage", ""),
+                ("Google Drive", "me@gmail.com"),
                 ("AWS", ""),
                 ("photos", ""),
                 ("Offline", "timed out"),
@@ -721,7 +841,8 @@ mod tests {
                 ("NAS", ""),
             ]
         );
-        assert_eq!(rows[11].location, "s3://1@photos/");
-        assert_eq!(rows[14].location, "sftp://4/");
+        assert_eq!(rows[10].location, "gdrive://9/");
+        assert_eq!(rows[12].location, "s3://1@photos/");
+        assert_eq!(rows[15].location, "sftp://4/");
     }
 }

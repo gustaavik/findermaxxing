@@ -8,6 +8,7 @@ mod category;
 mod change;
 mod conflict;
 mod cost;
+mod drive;
 mod entry;
 mod error;
 mod job;
@@ -30,6 +31,9 @@ pub use category::FileCategory;
 pub use change::ChangeEvent;
 pub use conflict::{Conflict, ConflictChoice, ConflictMemory, ConflictResolution, ConflictScope};
 pub use cost::{CostDecision, CostPolicy, CostReason, CostWarning, DEFAULT_LARGE_TRANSFER, TransferEstimate};
+pub use drive::{
+    DROPBOX_SCHEME, DriveAccount, DriveLocation, DriveProvider, GOOGLE_DRIVE_SCHEME, ONEDRIVE_SCHEME, disambiguate,
+};
 pub use entry::{EntryBatch, EntryKind, EntryMetadata, FileEntry, LIST_BATCH_SIZE, SymlinkTarget, Visibility};
 pub use error::{PathError, VfsError};
 pub use job::{JobPhase, JobProgress};

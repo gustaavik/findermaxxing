@@ -144,3 +144,39 @@ async fn unfinished_transfers_survive_a_restart() {
     store.checkpoint(unfinished, None).await.unwrap();
     assert_eq!(store.interrupted().await.unwrap()[0].in_flight, None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_accounts_persist_and_ids_are_not_reused() {
+    use application::ports::{DriveAccountStore, NewDriveAccount};
+    use domain::DriveProvider;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let store = reopen(&path);
+    let work = store
+        .add_drive(NewDriveAccount {
+            provider: DriveProvider::OneDrive,
+            name: "Work".into(),
+            email: "me@corp.test".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .add_drive(NewDriveAccount {
+            provider: DriveProvider::GoogleDrive,
+            name: "Alex".into(),
+            email: "a@gmail.test".into(),
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let store = reopen(&path);
+    let listed = store.list_drives().await.unwrap();
+    assert_eq!(listed.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Alex", "Work"]);
+    assert_eq!(listed[1], work);
+    store.remove_drive(work.id).await.unwrap();
+    let again = store
+        .add_drive(NewDriveAccount { provider: DriveProvider::Dropbox, name: "Box".into(), email: String::new() })
+        .await
+        .unwrap();
+    assert!(again.id.0 > work.id.0);
+}

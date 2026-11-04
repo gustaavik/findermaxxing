@@ -37,7 +37,9 @@ pub const LAYER_RULES: &[(&str, &[&str])] = &[
     ("domain", &[]),
     ("application", &["domain"]),
     ("vfs-contract-tests", &["domain", "application"]),
-    ("adapter-*", &["domain", "application"]),
+    // Shared infrastructure (OAuth, authenticated HTTP) for adapters only.
+    ("infra-*", &["domain", "application"]),
+    ("adapter-*", &["domain", "application", "infra-*"]),
     ("presentation", &["domain", "application"]),
     ("app", &["*"]),
 ];

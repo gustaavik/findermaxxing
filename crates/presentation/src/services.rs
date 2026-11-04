@@ -12,6 +12,7 @@ use application::use_cases::{
     PreparePreview, RedoOperation, RemoveFavorite, RemoveS3Account, RenameEntry, SaveSearch, SearchFiles,
     SetCostWarnings, TrashEntries, UndoOperation, UpdateItemProperties, WatchDirectory,
 };
+use application::use_cases::{AddDrive, ConnectDrive, DriveServices, ListDrives, RemoveDrive};
 use application::use_cases::{
     AddServer, ConnectServer, DiscardTransfer, ForgetLocalCopies, GetOfflineStatus, ListInterruptedTransfers,
     ListServers, MakeAvailableOffline, RemoveOfflineCopy, RemoveServer, ResumeTransfer, ServerServices,
@@ -35,6 +36,7 @@ pub struct AppServices {
     pub places: Places,
     pub accounts: RemoteAccounts,
     pub servers: ServerAccounts,
+    pub drives: CloudDrives,
     pub offline: Offline,
     pub item_details: ItemDetails,
     /// Runs every background task of the UI (sessions, jobs, previews).
@@ -136,6 +138,27 @@ impl ServerAccounts {
             list: Arc::new(ListServers::new(services.store.clone())),
             connect: Arc::new(ConnectServer::new(services.clone())),
             remove: Arc::new(RemoveServer::new(services.clone())),
+        }
+    }
+}
+
+/// Google Drive, Dropbox and OneDrive account use cases.
+#[derive(Debug, Clone)]
+pub struct CloudDrives {
+    pub add: Arc<AddDrive>,
+    pub list: Arc<ListDrives>,
+    pub connect: Arc<ConnectDrive>,
+    pub remove: Arc<RemoveDrive>,
+}
+
+impl CloudDrives {
+    #[must_use]
+    pub fn new(services: &DriveServices) -> Self {
+        Self {
+            add: Arc::new(AddDrive::new(services.clone())),
+            list: Arc::new(ListDrives::new(services.store.clone())),
+            connect: Arc::new(ConnectDrive::new(services.clone())),
+            remove: Arc::new(RemoveDrive::new(services.clone())),
         }
     }
 }
@@ -257,6 +280,11 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
         credentials: Arc::new(InMemoryKeychain::default()),
         connectors: vec![Arc::new(FakeServerConnector::new(domain::ServerProtocol::Sftp))],
     };
+    let drives = DriveServices {
+        store: Arc::new(application::testing::InMemoryDrives::default()),
+        credentials: Arc::new(InMemoryKeychain::default()),
+        connectors: vec![Arc::new(application::testing::FakeDriveConnector::new(domain::DriveProvider::Dropbox))],
+    };
     let journal: Arc<dyn TransferJournal> = Arc::new(InMemoryJournal::default());
     let pins: Arc<dyn PinStore> = Arc::new(InMemoryPins::default());
     AppServices {
@@ -277,6 +305,7 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
         places: Places::new(&favorites, Arc::new(FixedVolumes::default())),
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),
+        drives: CloudDrives::new(&drives),
         offline: Offline::new(&mounts, &pins, Arc::new(application::testing::RecordingJanitor::default())),
         item_details: ItemDetails::new(&mounts),
         mounts,

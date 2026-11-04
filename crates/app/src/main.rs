@@ -2,6 +2,8 @@
 //! cases with their ports, and hands the result to the presentation layer.
 //! No other crate names concrete adapters.
 
+mod drives;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -22,11 +24,13 @@ use application::ports::{
     StoreError, TransferJournal,
 };
 use application::use_cases::{
-    AccountServices, CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, ServerServices, WatchDirectory,
+    AccountServices, CoalesceWindow, DriveServices, ListDirectory, PreparePreview, SearchFiles, ServerServices,
+    WatchDirectory,
 };
 use domain::{CachePolicy, CostPolicy};
 use presentation::{
-    AppServices, FileOperations, ItemDetails, Offline, Places, RemoteAccounts, SavedSearches, ServerAccounts,
+    AppServices, CloudDrives, FileOperations, ItemDetails, Offline, Places, RemoteAccounts, SavedSearches,
+    ServerAccounts,
 };
 use tokio::runtime::Handle;
 
@@ -76,18 +80,23 @@ fn start() -> Result<i32, StartupError> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name(RUNTIME_THREAD_NAME).build()?;
     let handle = runtime.handle().clone();
     let store = metadata_store(&handle)?;
-    let providers = Providers::new(&handle)?;
+    let credentials: Arc<dyn CredentialStore> = Arc::new(KeyringStore::new(handle.clone()));
+    let providers = Providers::new(&handle, &credentials)?;
     let cache = file_cache(&handle, &store);
     let mounts = build_registry(&handle, &providers, cache.clone())?;
     let saved: Arc<dyn SavedSearchStore> = store.clone();
     let favorites: Arc<dyn FavoritesStore> = store.clone();
     let pins: Arc<dyn PinStore> = store.clone();
     let journal: Arc<dyn TransferJournal> = store.clone();
-    let credentials: Arc<dyn CredentialStore> = Arc::new(KeyringStore::new(handle.clone()));
     let servers = ServerServices {
         store: store.clone(),
         credentials: credentials.clone(),
         connectors: providers.server_connectors(),
+    };
+    let drives = DriveServices {
+        store: store.clone(),
+        credentials: credentials.clone(),
+        connectors: providers.drives.connectors(),
     };
     let accounts = AccountServices { store, credentials, connector: Arc::new(providers.s3.clone()) };
     let services = AppServices {
@@ -109,6 +118,7 @@ fn start() -> Result<i32, StartupError> {
         places: Places::new(&favorites, Arc::new(LocalVolumes::new(handle.clone()))),
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),
+        drives: CloudDrives::new(&drives),
         offline: Offline::new(&mounts, &pins, Arc::new(cache)),
         item_details: ItemDetails::new(&mounts),
         mounts,
@@ -127,16 +137,19 @@ struct Providers {
     sftp: SftpService,
     webdav: WebDavService,
     smb: SmbService,
+    drives: drives::Drives,
 }
 
 impl Providers {
-    fn new(runtime: &Handle) -> Result<Self, StartupError> {
+    fn new(runtime: &Handle, credentials: &Arc<dyn CredentialStore>) -> Result<Self, StartupError> {
         let known_hosts = platform_dir(DATA_HOME_VARIABLE, PLATFORM_DATA_HOME).join(KNOWN_HOSTS_FILE);
+        let browser = Arc::new(LocalOpener::new(runtime.clone()));
         Ok(Self {
             s3: S3Service::new(runtime.clone())?,
             sftp: SftpService::new(runtime.clone(), known_hosts)?,
             webdav: WebDavService::new(runtime.clone())?,
             smb: SmbService::new(runtime.clone())?,
+            drives: drives::Drives::new(runtime, browser, credentials)?,
         })
     }
 
@@ -158,7 +171,10 @@ fn build_registry(
         .with_provider(Arc::new(providers.s3.clone()))?
         .with_provider(Arc::new(providers.sftp.clone()))?
         .with_provider(Arc::new(providers.webdav.clone()))?
-        .with_provider(Arc::new(providers.smb.clone()))?;
+        .with_provider(Arc::new(providers.smb.clone()))?
+        .with_provider(Arc::new(providers.drives.google.clone()))?
+        .with_provider(Arc::new(providers.drives.dropbox.clone()))?
+        .with_provider(Arc::new(providers.drives.onedrive.clone()))?;
     Ok(Arc::new(CachingResolver::new(Arc::new(registry), cache)))
 }
 

@@ -27,7 +27,8 @@ mod sidebar_controller;
 mod view_model;
 
 pub use services::{
-    AppServices, FileOperations, ItemDetails, Offline, Places, RemoteAccounts, SavedSearches, ServerAccounts,
+    AppServices, CloudDrives, FileOperations, ItemDetails, Offline, Places, RemoteAccounts, SavedSearches,
+    ServerAccounts,
 };
 
 /// Starts the Qt event loop and blocks until the last window closes.

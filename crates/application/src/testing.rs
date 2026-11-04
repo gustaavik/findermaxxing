@@ -1227,3 +1227,116 @@ impl crate::ports::CacheJanitor for RecordingJanitor {
         future::ready(Ok(())).boxed()
     }
 }
+
+#[derive(Debug, Default)]
+pub struct InMemoryDrives {
+    accounts: Mutex<Vec<domain::DriveAccount>>,
+    next: Mutex<i64>,
+}
+
+impl InMemoryDrives {
+    #[must_use]
+    pub fn all(&self) -> Vec<domain::DriveAccount> {
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl crate::ports::DriveAccountStore for InMemoryDrives {
+    fn list_drives(&self) -> BoxFuture<'static, Result<Vec<domain::DriveAccount>, StoreError>> {
+        future::ready(Ok(self.all())).boxed()
+    }
+
+    fn add_drive(
+        &self,
+        account: crate::ports::NewDriveAccount,
+    ) -> BoxFuture<'static, Result<domain::DriveAccount, StoreError>> {
+        let id = {
+            let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+            *next += 1;
+            AccountId(*next)
+        };
+        let added = account.with_id(id);
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).push(added.clone());
+        future::ready(Ok(added)).boxed()
+    }
+
+    fn remove_drive(&self, id: AccountId) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).retain(|a| a.id != id);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// A drive connector whose "browser" answers at once: with
+/// `SIGNED_IN_TOKEN`, or with the scripted sign-in error.
+#[derive(Debug)]
+pub struct FakeDriveConnector {
+    provider: domain::DriveProvider,
+    sign_in_error: Option<crate::ports::SignInError>,
+    refuse_connect: bool,
+    connected: Mutex<Vec<AccountId>>,
+}
+
+impl FakeDriveConnector {
+    pub const SIGNED_IN_TOKEN: &'static str = "refresh-token";
+
+    #[must_use]
+    pub fn new(provider: domain::DriveProvider) -> Self {
+        Self { provider, sign_in_error: None, refuse_connect: false, connected: Mutex::default() }
+    }
+
+    #[must_use]
+    pub fn failing_sign_in(provider: domain::DriveProvider, error: crate::ports::SignInError) -> Self {
+        Self { sign_in_error: Some(error), ..Self::new(provider) }
+    }
+
+    /// Signs in, but the provider then rejects the token.
+    #[must_use]
+    pub fn refusing_connect(provider: domain::DriveProvider) -> Self {
+        Self { refuse_connect: true, ..Self::new(provider) }
+    }
+
+    #[must_use]
+    pub fn connected(&self) -> Vec<AccountId> {
+        self.connected.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl crate::ports::DriveConnector for FakeDriveConnector {
+    fn provider(&self) -> domain::DriveProvider {
+        self.provider
+    }
+
+    fn sign_in(
+        &self,
+        cancel: CancelToken,
+    ) -> BoxFuture<'static, Result<crate::ports::SignedIn, crate::ports::SignInError>> {
+        let result = match (&self.sign_in_error, cancel.is_cancelled()) {
+            (_, true) => Err(crate::ports::SignInError::Cancelled),
+            (Some(error), false) => Err(error.clone()),
+            (None, false) => Ok(crate::ports::SignedIn {
+                email: "me@example.com".into(),
+                display_name: "Me".into(),
+                refresh_token: Secret::new(Self::SIGNED_IN_TOKEN.into()),
+            }),
+        };
+        future::ready(result).boxed()
+    }
+
+    fn connect(
+        &self,
+        account: &domain::DriveAccount,
+        refresh_token: Secret,
+    ) -> BoxFuture<'static, Result<(), VfsError>> {
+        let result = if self.refuse_connect || refresh_token.expose() != Self::SIGNED_IN_TOKEN {
+            Err(VfsError::PermissionDenied)
+        } else {
+            self.connected.lock().unwrap_or_else(PoisonError::into_inner).push(account.id);
+            Ok(())
+        };
+        future::ready(result).boxed()
+    }
+
+    fn disconnect(&self, id: AccountId) {
+        self.connected.lock().unwrap_or_else(PoisonError::into_inner).retain(|c| *c != id);
+    }
+}

@@ -1,0 +1,23 @@
+[package]
+name = "mock-cloud"
+description = "Test doubles of the cloud-drive APIs (OAuth, Google Drive v3, Dropbox v2, Microsoft Graph) as one local HTTP server. Tests only; never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "macros"] }
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+base64.workspace = true
+url.workspace = true
+reqwest.workspace = true
+
+[lints]
+workspace = true

@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "adapter-dropbox"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "domain",
+ "futures",
+ "infra-oauth",
+ "mock-cloud",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "vfs-contract-tests",
+]
+
+[[package]]
 name = "adapter-file-cache"
 version = "0.1.0"
 dependencies = [
@@ -11,6 +26,21 @@ dependencies = [
  "futures",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "adapter-gdrive"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "domain",
+ "futures",
+ "infra-oauth",
+ "mock-cloud",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "vfs-contract-tests",
 ]
 
 [[package]]
@@ -35,6 +65,22 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "tempfile",
+ "tokio",
+ "vfs-contract-tests",
+]
+
+[[package]]
+name = "adapter-onedrive"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "domain",
+ "futures",
+ "infra-oauth",
+ "mock-cloud",
+ "percent-encoding",
+ "reqwest",
+ "serde_json",
  "tokio",
  "vfs-contract-tests",
 ]
@@ -208,9 +254,12 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "adapter-dropbox",
  "adapter-file-cache",
+ "adapter-gdrive",
  "adapter-keyring",
  "adapter-local-fs",
+ "adapter-onedrive",
  "adapter-preview",
  "adapter-s3",
  "adapter-sftp",
@@ -220,7 +269,10 @@ dependencies = [
  "adapter-webdav",
  "application",
  "domain",
+ "futures",
+ "infra-oauth",
  "presentation",
+ "reqwest",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -2210,6 +2262,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2235,6 +2293,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -2427,6 +2486,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a37b2691796cffeb8a8cd305ac66e65841559f147f4e63231d0eafa4db5384d1"
 dependencies = [
  "rustversion",
+]
+
+[[package]]
+name = "infra-oauth"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "base64",
+ "domain",
+ "futures",
+ "getrandom 0.4.3",
+ "mock-cloud",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -2754,6 +2831,22 @@ dependencies = [
  "rand_core",
  "sha3",
  "shake",
+]
+
+[[package]]
+name = "mock-cloud"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3468,6 +3561,9 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -3934,6 +4030,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "serde_urlencoded"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
+dependencies = [
+ "form_urlencoded",
+ "itoa",
+ "ryu",
+ "serde",
 ]
 
 [[package]]

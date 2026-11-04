@@ -7,6 +7,7 @@
 mod accounts;
 mod cache;
 mod clock;
+mod drives;
 mod job;
 mod journal;
 mod lister;
@@ -25,6 +26,7 @@ pub use accounts::{
 };
 pub use cache::{AccountMounts, CacheIndex, CacheJanitor, CacheRecord, PinStore, is_pinned};
 pub use clock::Clock;
+pub use drives::{DriveAccountStore, DriveConnector, NewDriveAccount, SignInError, SignedIn, UrlOpener};
 pub use job::{ConflictResolver, CostConfirmer, JobObserver};
 pub use journal::{InFlightWrite, InterruptedTransfer, JournalEntry, JournalId, JournaledKind, TransferJournal};
 pub use lister::{DynLister, Lister};

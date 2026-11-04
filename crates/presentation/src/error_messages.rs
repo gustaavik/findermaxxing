@@ -1,6 +1,6 @@
 use application::operations::OperationError;
-use application::ports::ConnectError;
-use application::use_cases::ServerError;
+use application::ports::{ConnectError, SignInError};
+use application::use_cases::{DriveError, ServerError};
 use domain::{PathSegment, StoragePath, VfsError};
 
 /// Maps domain errors to wording suitable for the window, never raw OS text
@@ -66,6 +66,28 @@ pub(crate) fn server_message(error: &ServerError) -> String {
         }
         ServerError::Connect(ConnectError::Failed(error)) => format!("Couldn't connect: {error}"),
     }
+}
+
+/// Why a cloud drive couldn't be added or connected; `None` when the user
+/// cancelled the sign-in on purpose.
+pub(crate) fn drive_message(error: &DriveError) -> Option<String> {
+    Some(match error {
+        DriveError::SignIn(SignInError::Cancelled) => return None,
+        DriveError::SignIn(SignInError::NotConfigured(provider)) => format!(
+            "{provider} isn't available in this build: it was built without an OAuth client ID (see docs/oauth-setup.md)."
+        ),
+        DriveError::SignIn(SignInError::Denied(reason)) => format!("Access wasn't granted: {reason}"),
+        DriveError::SignIn(SignInError::Failed(VfsError::PermissionDenied)) | DriveError::MissingToken => {
+            "The sign-in has expired or was revoked. Remove the account and add it again.".to_owned()
+        }
+        DriveError::SignIn(SignInError::Failed(VfsError::Transient { .. })) => {
+            "The provider didn't answer. Check that you're online.".to_owned()
+        }
+        DriveError::SignIn(SignInError::Failed(error)) => format!("Signing in didn't work: {error}"),
+        DriveError::NoProvider(provider) => format!("{provider} isn't supported in this build."),
+        DriveError::Keychain(error) => format!("The keychain couldn't be used: {error}"),
+        DriveError::Store(error) => format!("The account couldn't be saved: {error}"),
+    })
 }
 
 /// Message for an item that could not be opened.

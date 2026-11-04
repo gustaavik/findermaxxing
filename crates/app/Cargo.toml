@@ -24,6 +24,12 @@ adapter-file-cache.workspace = true
 adapter-sftp.workspace = true
 adapter-smb.workspace = true
 adapter-webdav.workspace = true
+adapter-gdrive.workspace = true
+adapter-dropbox.workspace = true
+adapter-onedrive.workspace = true
+infra-oauth.workspace = true
+reqwest.workspace = true
+futures.workspace = true
 presentation.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 thiserror.workspace = true

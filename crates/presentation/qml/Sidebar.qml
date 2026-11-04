@@ -49,6 +49,7 @@ Pane {
                 readonly property bool isHeading: kind === SidebarController.Heading
                 readonly property bool isAccount: kind === SidebarController.Account
                 readonly property bool isServer: kind === SidebarController.Server
+                readonly property bool isDrive: kind === SidebarController.Drive
                 readonly property bool openable: location !== ""
 
                 width: ListView.view.width
@@ -104,7 +105,7 @@ Pane {
                 TapHandler {
                     acceptedButtons: Qt.RightButton
                     onTapped: {
-                        if (entry.kind === SidebarController.Favorite || entry.isAccount || entry.isServer) {
+                        if (entry.kind === SidebarController.Favorite || entry.isAccount || entry.isServer || entry.isDrive) {
                             itemMenu.target = entry
                             itemMenu.popup()
                         }
@@ -168,10 +169,11 @@ Pane {
             }
         }
         MenuItem {
-            visible: itemMenu.target !== null && itemMenu.target.isAccount
+            visible: itemMenu.target !== null && (itemMenu.target.isAccount || itemMenu.target.isDrive)
             height: visible ? implicitHeight : 0
             text: qsTr("Remove Account…")
             onTriggered: {
+                removeAccount.isDrive = itemMenu.target.isDrive
                 removeAccount.accountId = itemMenu.target.accountId
                 removeAccount.accountName = itemMenu.target.label
                 removeAccount.open()
@@ -184,16 +186,20 @@ Pane {
 
         property var accountId: 0
         property string accountName: ""
+        property bool isDrive: false
 
         parent: Overlay.overlay
         anchors.centerIn: parent
         modal: true
         title: qsTr("Remove “%1”?").arg(accountName)
         standardButtons: Dialog.Cancel | Dialog.Ok
-        onAccepted: sidebar.controller.removeAccount(accountId)
+        onAccepted: isDrive ? sidebar.controller.removeDrive(accountId) : sidebar.controller.removeAccount(accountId)
 
         Label {
-            text: qsTr("The account and its saved secret are removed from this computer.\nNothing in the buckets is deleted.")
+            text: removeAccount.isDrive
+                  ? qsTr("The account, its offline copies and its sign-in are removed from this computer.\nNothing in the drive is deleted. To revoke access completely, also remove FinderMaxxing in the account's security settings.")
+                  : qsTr("The account and its saved secret are removed from this computer.\nNothing in the buckets is deleted.")
+            wrapMode: Text.Wrap
         }
     }
 

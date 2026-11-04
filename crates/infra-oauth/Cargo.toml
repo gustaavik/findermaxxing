@@ -1,0 +1,28 @@
+[package]
+name = "infra-oauth"
+description = "OAuth 2.0 for native apps (RFC 8252: PKCE, loopback redirect), token refresh and an authenticated HTTP client, shared by the cloud-drive adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+mock-cloud.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true
