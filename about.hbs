@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FinderMaxxing third-party licenses</title>
+<style>
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  pre { white-space: pre-wrap; background: #f5f5f5; padding: 1rem; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } pre { background: #2a2a2a; } }
+</style>
+</head>
+<body>
+<h1>Third-party licenses</h1>
+<p>FinderMaxxing uses the Qt framework under the GNU LGPL v3, linked dynamically. You may replace the Qt
+libraries shipped with this application with your own build; see the Qt notice in the application bundle.</p>
+<h2>Overview</h2>
+<ul>
+{{#each overview}}
+  <li>{{name}} ({{count}})</li>
+{{/each}}
+</ul>
+{{#each licenses}}
+<h3 id="{{id}}">{{name}}</h3>
+<p>Used by:</p>
+<ul>
+{{#each used_by}}
+  <li>{{crate.name}} {{crate.version}}</li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

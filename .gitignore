@@ -1,0 +1,7 @@
+/target
+/dist
+*.dSYM
+.DS_Store
+aqtinstall.log
+# Written by cxx-qt-build for the QML language server; machine-specific paths.
+.qmlls.ini

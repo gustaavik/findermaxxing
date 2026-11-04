@@ -1,0 +1,28 @@
+[package]
+name = "presentation"
+description = "Thin cxx-qt bridge objects, C++ shims and QML. Translates UI events to use cases."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "presentation"
+
+[dependencies]
+domain.workspace = true
+application.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+cxx.workspace = true
+cxx-qt.workspace = true
+cxx-qt-lib.workspace = true
+
+[build-dependencies]
+cxx-qt-build.workspace = true
+
+[dev-dependencies]
+application = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

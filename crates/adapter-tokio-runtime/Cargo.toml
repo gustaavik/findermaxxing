@@ -1,0 +1,19 @@
+[package]
+name = "adapter-tokio-runtime"
+description = "Runtime-backed implementations of runtime-agnostic ports (Clock)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["time", "rt", "macros", "test-util"] }
+
+[lints]
+workspace = true

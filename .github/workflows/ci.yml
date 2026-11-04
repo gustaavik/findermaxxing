@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *" # nightly: also runs the 100k-file listing benchmark
+
+env:
+  CARGO_TERM_COLOR: always
+  QT_VERSION: "6.8.3"
+
+jobs:
+  core:
+    name: Core crates (no Qt)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-about
+      - run: cargo xtask ci
+      - run: cargo xtask licenses
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: target/third-party-licenses.html
+
+  desktop:
+    name: Full build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtimageformats
+          cache: true
+      - name: Point cxx-qt at Qt
+        run: echo "QMAKE=$(which qmake)" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo xtask ci
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: 100k-file listing benchmark
+        if: github.event_name == 'schedule'
+        run: cargo test --release -p adapter-local-fs --test local_fs -- --ignored large_dir --nocapture

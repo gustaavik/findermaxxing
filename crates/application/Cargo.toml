@@ -1,0 +1,24 @@
+[package]
+name = "application"
+description = "Use cases and the ports (traits) they depend on. No runtime, IO or UI crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# In-memory fakes of every port, for use-case tests and the contract suite.
+testing = []
+
+[dependencies]
+domain.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+futures-executor.workspace = true
+application = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,74 @@
+[workspace]
+resolver = "3"
+# `presentation` and `app` need Qt (QMAKE); everything else builds without it.
+default-members = [
+    "crates/domain",
+    "crates/application",
+    "crates/vfs-contract-tests",
+    "crates/adapter-local-fs",
+    "crates/adapter-tokio-runtime",
+    "crates/arch-tests",
+    "xtask",
+]
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/vfs-contract-tests",
+    "crates/adapter-local-fs",
+    "crates/adapter-tokio-runtime",
+    "crates/presentation",
+    "crates/app",
+    "crates/arch-tests",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+application = { path = "crates/application" }
+vfs-contract-tests = { path = "crates/vfs-contract-tests" }
+adapter-local-fs = { path = "crates/adapter-local-fs" }
+adapter-tokio-runtime = { path = "crates/adapter-tokio-runtime" }
+presentation = { path = "crates/presentation" }
+
+thiserror = "2"
+futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
+futures-executor = "0.3.34"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio-util = "0.7.20"
+notify = "8.2"
+tempfile = "3"
+serde_json = "1"
+cxx = "1.0.205"
+cxx-qt = "0.10.0"
+cxx-qt-lib = { version = "0.10.0", features = ["qt_gui", "qt_qml", "qt_quickcontrols"] }
+cxx-qt-build = "0.10.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+too_many_lines = "deny"
+cognitive_complexity = "deny"
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

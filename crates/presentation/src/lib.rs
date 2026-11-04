@@ -1,0 +1,27 @@
+//! Presentation layer: Qt bridge objects, view-models and QML.
+//!
+//! Bridge objects stay thin: they translate UI events into use-case calls and
+//! use-case output into view-model updates. Everything testable without Qt
+//! (`view_model`, `history`, `row_format`, `error_messages`) is plain Rust.
+
+mod error_messages;
+mod folder_view_controller;
+mod history;
+mod row_format;
+mod rows_bridge;
+mod services;
+mod services_bridge;
+mod session;
+mod view_model;
+
+pub use services::AppServices;
+
+/// Starts the Qt event loop and blocks until the last window closes.
+/// Returns the process exit code.
+#[must_use]
+pub fn run(services: AppServices) -> i32 {
+    cxx_qt::init_crate!(cxx_qt_lib);
+    cxx_qt::init_crate!(presentation);
+    cxx_qt::init_qml_module!("FinderMaxxing");
+    services_bridge::run_application(Box::new(services))
+}
