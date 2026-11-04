@@ -4,7 +4,8 @@ use std::sync::Arc;
 use domain::{Capabilities, Capability, MountId, Scheme, VfsError};
 
 use super::{
-    DynCopier, DynFolderMaker, DynLauncher, DynLister, DynMaterializer, DynMover, DynRemover, DynTrasher, DynWatcher,
+    DynCopier, DynFolderMaker, DynLauncher, DynLister, DynMaterializer, DynMover, DynReader, DynRemover, DynTrasher,
+    DynWatcher, DynWriter, MetadataEditor, Presigner, VersionLister,
 };
 
 /// Declares the role slots of [`MountHandle`]: one optional `Arc<dyn Role>`
@@ -17,6 +18,7 @@ macro_rules! mount_roles {
         #[derive(Clone)]
         pub struct MountHandle {
             capabilities: Capabilities,
+            region: Option<String>,
             $($role: Option<Arc<dyn $dyn_trait>>,)+
         }
 
@@ -24,7 +26,7 @@ macro_rules! mount_roles {
             /// `semantics` are guarantees beyond role presence (`AtomicRename`, …).
             #[must_use]
             pub fn builder(semantics: Capabilities) -> MountHandleBuilder {
-                MountHandleBuilder { handle: Self { capabilities: semantics, $($role: None,)+ } }
+                MountHandleBuilder { handle: Self { capabilities: semantics, region: None, $($role: None,)+ } }
             }
 
             $(
@@ -58,12 +60,23 @@ mount_roles! {
     trasher: DynTrasher => Trash,
     launcher: DynLauncher => Launch,
     materializer: DynMaterializer => LocalAccess,
+    reader: DynReader => Read,
+    writer: DynWriter => Write,
+    metadata_editor: MetadataEditor => EditMetadata,
+    presigner: Presigner => Presign,
+    version_lister: VersionLister => ListVersions,
 }
 
 impl MountHandle {
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
+    }
+
+    /// The provider's region (for cross-region cost warnings), if it has one.
+    #[must_use]
+    pub fn region(&self) -> Option<&str> {
+        self.region.as_deref()
     }
 }
 
@@ -79,6 +92,12 @@ pub struct MountHandleBuilder {
 }
 
 impl MountHandleBuilder {
+    #[must_use]
+    pub fn region(mut self, region: Option<String>) -> Self {
+        self.handle.region = region;
+        self
+    }
+
     #[must_use]
     pub fn build(self) -> MountHandle {
         self.handle

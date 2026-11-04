@@ -14,6 +14,10 @@ fn main() {
         "qml/PreviewPane.qml",
         "qml/BulkRenameDialog.qml",
         "qml/SearchBar.qml",
+        "qml/Sidebar.qml",
+        "qml/AddAccountDialog.qml",
+        "qml/CostDialog.qml",
+        "qml/InfoDialog.qml",
     ]);
 
     // SAFETY: only adds a language-standard flag; no other cc settings are touched.
@@ -35,6 +39,8 @@ fn main() {
             "src/preview_controller.rs",
             "src/quick_look_bridge.rs",
             "src/bulk_rename_controller.rs",
+            "src/sidebar_controller.rs",
+            "src/item_details_controller.rs",
         ])
         .cpp_files([
             "cpp/entry_list_model.h",
@@ -44,6 +50,8 @@ fn main() {
             "cpp/job_list_model.h",
             "cpp/job_list_model.cpp",
             "cpp/clipboard.cpp",
+            "cpp/sidebar_model.h",
+            "cpp/sidebar_model.cpp",
             "cpp/bootstrap.cpp",
             quick_look_source(),
         ])

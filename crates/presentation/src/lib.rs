@@ -10,6 +10,7 @@ mod error_messages;
 mod file_urls;
 mod folder_view_controller;
 mod history;
+mod item_details_controller;
 mod job_reporting;
 mod job_text;
 mod operations_controller;
@@ -21,9 +22,10 @@ mod search_options;
 mod services;
 mod services_bridge;
 mod session;
+mod sidebar_controller;
 mod view_model;
 
-pub use services::{AppServices, FileOperations, SavedSearches};
+pub use services::{AppServices, FileOperations, ItemDetails, Places, RemoteAccounts, SavedSearches};
 
 /// Starts the Qt event loop and blocks until the last window closes.
 /// Returns the process exit code.

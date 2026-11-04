@@ -6,29 +6,37 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use adapter_local_fs::{LocalFs, LocalFsFactory, LocalTrash, storage_path_from_native};
+use adapter_keyring::KeyringStore;
+use adapter_local_fs::{LocalFs, LocalFsFactory, LocalOpener, LocalTrash, LocalVolumes, storage_path_from_native};
 use adapter_preview::{LocalArchiveInspector, SyntectTextRenderer};
+use adapter_s3::S3Service;
 use adapter_sqlite_store::SqliteStore;
 use adapter_tokio_runtime::TokioClock;
 use application::ProviderRegistry;
-use application::ports::{MountResolver, NewSavedSearch, SavedSearchStore, StoreError};
-use application::use_cases::{CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, WatchDirectory};
-use domain::{SavedSearch, SavedSearchId};
-use futures::FutureExt;
-use futures::future::{self, BoxFuture};
-use presentation::{AppServices, FileOperations, SavedSearches};
+use application::ports::{FavoritesStore, MountResolver, SavedSearchStore, StoreError};
+use application::use_cases::{
+    AccountServices, CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, WatchDirectory,
+};
+use domain::CostPolicy;
+use presentation::{AppServices, FileOperations, ItemDetails, Places, RemoteAccounts, SavedSearches};
 use tokio::runtime::Handle;
 
 const HOME_VARIABLE: &str = "HOME";
 const FALLBACK_HOME: &str = "/";
 const RUNTIME_THREAD_NAME: &str = "findermaxxing-worker";
-const APP_DATA_FOLDER: &str = "FinderMaxxing";
+const APP_FOLDER: &str = "FinderMaxxing";
 const METADATA_FILE: &str = "metadata.sqlite3";
+const S3_CACHE_FOLDER: &str = "s3";
 #[cfg(target_os = "macos")]
 const PLATFORM_DATA_HOME: &str = "Library/Application Support";
 #[cfg(not(target_os = "macos"))]
 const PLATFORM_DATA_HOME: &str = ".local/share";
+#[cfg(target_os = "macos")]
+const PLATFORM_CACHE_HOME: &str = "Library/Caches";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_CACHE_HOME: &str = ".cache";
 const DATA_HOME_VARIABLE: &str = "XDG_DATA_HOME";
+const CACHE_HOME_VARIABLE: &str = "XDG_CACHE_HOME";
 
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
@@ -40,6 +48,8 @@ enum StartupError {
     Path(#[from] domain::PathError),
     #[error("could not resolve the home folder: {0}")]
     Home(#[from] domain::VfsError),
+    #[error("no metadata store, not even in memory: {0}")]
+    Store(#[from] StoreError),
 }
 
 fn main() -> ExitCode {
@@ -54,23 +64,30 @@ fn main() -> ExitCode {
 
 fn start() -> Result<i32, StartupError> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name(RUNTIME_THREAD_NAME).build()?;
-    let registry = build_registry(runtime.handle().clone())?;
     let handle = runtime.handle().clone();
+    let s3 =
+        S3Service::new(handle.clone(), platform_dir(CACHE_HOME_VARIABLE, PLATFORM_CACHE_HOME).join(S3_CACHE_FOLDER))?;
+    let mounts = build_registry(handle.clone(), s3.clone())?;
+    let store = metadata_store(&handle)?;
+    let saved: Arc<dyn SavedSearchStore> = store.clone();
+    let favorites: Arc<dyn FavoritesStore> = store.clone();
+    let accounts =
+        AccountServices { store, credentials: Arc::new(KeyringStore::new(handle.clone())), connector: Arc::new(s3) };
     let services = AppServices {
-        list_directory: Arc::new(ListDirectory::new(registry.clone())),
-        watch_directory: Arc::new(WatchDirectory::new(
-            registry.clone(),
-            Arc::new(TokioClock),
-            CoalesceWindow::default(),
-        )),
-        search: Arc::new(SearchFiles::new(registry.clone())),
+        list_directory: Arc::new(ListDirectory::new(mounts.clone())),
+        watch_directory: Arc::new(WatchDirectory::new(mounts.clone(), Arc::new(TokioClock), CoalesceWindow::default())),
+        search: Arc::new(SearchFiles::new(mounts.clone())),
         preview: Arc::new(PreparePreview::new(
-            registry.clone(),
+            mounts.clone(),
             Arc::new(SyntectTextRenderer::new(handle.clone())),
             Arc::new(LocalArchiveInspector::new(handle.clone())),
         )),
-        saved_searches: SavedSearches::new(&metadata_store(&handle)),
-        operations: FileOperations::new(&registry),
+        saved_searches: SavedSearches::new(&saved),
+        operations: FileOperations::new(&mounts, Arc::new(LocalOpener::new(handle.clone())), CostPolicy::default()),
+        places: Places::new(&favorites, Arc::new(LocalVolumes::new(handle.clone()))),
+        accounts: RemoteAccounts::new(&accounts),
+        item_details: ItemDetails::new(&mounts),
+        mounts,
         runtime: handle,
         home: storage_path_from_native(&home_dir())?,
     };
@@ -81,52 +98,32 @@ fn start() -> Result<i32, StartupError> {
 }
 
 /// Every provider is registered here and nowhere else (Open/Closed).
-fn build_registry(runtime: Handle) -> Result<Arc<dyn MountResolver>, StartupError> {
+fn build_registry(runtime: Handle, s3: S3Service) -> Result<Arc<dyn MountResolver>, StartupError> {
     let local = LocalFsFactory::new(LocalFs::new(runtime.clone()), LocalTrash::platform_default(runtime))?;
-    Ok(Arc::new(ProviderRegistry::default().with_provider(Arc::new(local))?))
+    let registry = ProviderRegistry::default().with_provider(Arc::new(local))?.with_provider(Arc::new(s3))?;
+    Ok(Arc::new(registry))
 }
 
-/// The app's SQLite store. If it can't be opened (read-only home, corrupt
-/// file), saved searches live in memory for this session instead of the app
+/// The app's SQLite store. If the file can't be opened (read-only home,
+/// corrupt file), data lives in memory for this session instead of the app
 /// refusing to start.
-fn metadata_store(runtime: &Handle) -> Arc<dyn SavedSearchStore> {
-    let path = data_dir().join(METADATA_FILE);
+fn metadata_store(runtime: &Handle) -> Result<Arc<SqliteStore>, StoreError> {
+    let path = platform_dir(DATA_HOME_VARIABLE, PLATFORM_DATA_HOME).join(METADATA_FILE);
     match SqliteStore::open(&path, runtime.clone()) {
-        Ok(store) => Arc::new(store),
+        Ok(store) => Ok(Arc::new(store)),
         Err(error) => {
-            eprintln!("FinderMaxxing: {} unavailable ({error}); saved searches will not persist", path.display());
-            match SqliteStore::in_memory(runtime.clone()) {
-                Ok(store) => Arc::new(store),
-                Err(_) => Arc::new(NoSavedSearches),
-            }
+            eprintln!("FinderMaxxing: {} unavailable ({error}); settings will not persist", path.display());
+            SqliteStore::in_memory(runtime.clone()).map(Arc::new)
         }
     }
 }
 
-/// `~/Library/Application Support/FinderMaxxing` on macOS,
-/// `$XDG_DATA_HOME/FinderMaxxing` (default `~/.local/share/…`) elsewhere.
-fn data_dir() -> PathBuf {
-    let xdg = std::env::var_os(DATA_HOME_VARIABLE).map(PathBuf::from).filter(|p| p.is_absolute());
+/// `~/Library/<…>/FinderMaxxing` on macOS; the XDG directory (or its
+/// default below home) elsewhere.
+fn platform_dir(xdg_variable: &str, platform_default: &str) -> PathBuf {
+    let xdg = std::env::var_os(xdg_variable).map(PathBuf::from).filter(|p| p.is_absolute());
     let base = if cfg!(target_os = "macos") { None } else { xdg };
-    base.unwrap_or_else(|| home_dir().join(PLATFORM_DATA_HOME)).join(APP_DATA_FOLDER)
-}
-
-/// Last resort when even an in-memory SQLite fails: an always-empty store.
-#[derive(Debug)]
-struct NoSavedSearches;
-
-impl SavedSearchStore for NoSavedSearches {
-    fn list(&self) -> BoxFuture<'static, Result<Vec<SavedSearch>, StoreError>> {
-        future::ready(Ok(Vec::new())).boxed()
-    }
-
-    fn save(&self, _search: NewSavedSearch) -> BoxFuture<'static, Result<SavedSearch, StoreError>> {
-        future::ready(Err(StoreError::Unavailable("no metadata store".to_owned()))).boxed()
-    }
-
-    fn delete(&self, _id: SavedSearchId) -> BoxFuture<'static, Result<(), StoreError>> {
-        future::ready(Ok(())).boxed()
-    }
+    base.unwrap_or_else(|| home_dir().join(platform_default)).join(APP_FOLDER)
 }
 
 fn home_dir() -> PathBuf {

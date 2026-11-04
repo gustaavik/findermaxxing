@@ -34,6 +34,7 @@ impl World {
         let ctx = JobContext {
             observer: self.observer.clone(),
             resolver: resolver.clone(),
+            costs: Arc::new(application::operations::AcceptCosts),
             cancel: application::CancelToken::never(),
         };
         (ctx, resolver)
@@ -336,7 +337,9 @@ fn permanent_delete_is_not_undoable() {
 fn open_launches_the_item() {
     let w = World::new();
     w.fake.add_file("/doc.pdf", 1);
-    block_on(OpenEntry::new(w.registry.clone()).execute(&w.fake.path("/doc.pdf"))).unwrap();
+    let opener = Arc::new(application::testing::RecordingOpener::default());
+    block_on(OpenEntry::new(w.registry.clone(), opener.clone()).execute(&w.fake.path("/doc.pdf"))).unwrap();
+    assert!(opener.opened().is_empty(), "local items use the provider's launcher");
     assert_eq!(w.fake.launched(), vec![w.fake.path("/doc.pdf")]);
 }
 

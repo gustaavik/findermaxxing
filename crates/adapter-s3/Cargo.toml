@@ -1,0 +1,24 @@
+[package]
+name = "adapter-s3"
+description = "s3:// provider for AWS S3 and S3-compatible services (MinIO, R2, B2, Wasabi)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "fs", "io-util"] }
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+
+[dev-dependencies]
+vfs-contract-tests.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

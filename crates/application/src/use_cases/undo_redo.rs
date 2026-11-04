@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::operations::{HistoryEntry, JobContext, OperationError, OperationHistory, OperationReport, executor};
+use crate::operations::executor::{self, NoTrash};
+use crate::operations::{HistoryEntry, JobContext, OperationError, OperationHistory, OperationReport};
 use crate::ports::MountResolver;
 
 /// Reverts the most recent operation. What the revert did becomes the redo entry.
@@ -21,11 +22,11 @@ impl UndoOperation {
     /// [`OperationError::NothingToUndo`] when the history is empty.
     pub async fn execute(&self, ctx: &JobContext) -> Result<OperationReport, OperationError> {
         let entry = self.history.take_undo().ok_or(OperationError::NothingToUndo)?;
-        let report = executor::execute(&*self.mounts, &entry.operation.inverse(), ctx).await;
+        let report = executor::execute(&*self.mounts, &entry.operation.inverse(), NoTrash::DeleteCreated, ctx).await;
         if report.done.is_empty() {
             // Nothing changed (e.g. the item is gone); keep the entry so the user can retry.
             self.history.push_undo(entry);
-        } else {
+        } else if report.done.is_reversible() {
             self.history.push_redo(HistoryEntry { kind: entry.kind, operation: report.done.clone() });
         }
         Ok(report)
@@ -48,7 +49,7 @@ impl RedoOperation {
     /// [`OperationError::NothingToRedo`] when nothing was undone.
     pub async fn execute(&self, ctx: &JobContext) -> Result<OperationReport, OperationError> {
         let entry = self.history.take_redo().ok_or(OperationError::NothingToRedo)?;
-        let report = executor::execute(&*self.mounts, &entry.operation.inverse(), ctx).await;
+        let report = executor::execute(&*self.mounts, &entry.operation.inverse(), NoTrash::DeleteCreated, ctx).await;
         if report.done.is_empty() {
             self.history.push_redo(entry);
         } else {

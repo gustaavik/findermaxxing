@@ -9,8 +9,8 @@ use std::pin::Pin;
 use application::ports::NewSavedSearch;
 use application::use_cases::HiddenFiles;
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{QString, QStringList};
-use domain::{SavedSearch, SearchQuery, SortKey, SortOrder, SortSpec, StoragePath};
+use cxx_qt_lib::{QList, QString, QStringList};
+use domain::{Capability, S3Location, SavedSearch, SearchQuery, SortKey, SortOrder, SortSpec, StoragePath};
 
 use crate::error_messages::user_message;
 use crate::history::History;
@@ -115,6 +115,11 @@ pub mod qobject {
         #[qproperty(i32, sort_column)]
         #[qproperty(bool, sort_ascending)]
         #[qproperty(bool, searching)]
+        /// The location reports changes itself; otherwise views reload after jobs.
+        #[qproperty(bool, watched)]
+        #[qproperty(bool, can_trash)]
+        /// A billed remote location (S3): share links and metadata are available.
+        #[qproperty(bool, remote)]
         #[qproperty(QString, search_status)]
         #[qproperty(QString, search_text)]
         #[qproperty(i32, search_kind)]
@@ -130,6 +135,12 @@ pub mod qobject {
         fn open_home(self: Pin<&mut FolderViewController>);
         #[qinvokable]
         fn open_location(self: Pin<&mut FolderViewController>, location: &QString);
+        /// Opens a location in its lossless encoded form (sidebar, saved items).
+        #[qinvokable]
+        fn open_location_id(self: Pin<&mut FolderViewController>, location_id: &QString);
+        /// Reloads if this view shows one of `folders` and can't watch it.
+        #[qinvokable]
+        fn reload_if_showing(self: Pin<&mut FolderViewController>, folders: &QStringList);
         #[qinvokable]
         fn activate(self: Pin<&mut FolderViewController>, row: i32);
         #[qinvokable]
@@ -205,6 +216,9 @@ pub struct FolderViewControllerRust {
     sort_column: i32,
     sort_ascending: bool,
     searching: bool,
+    watched: bool,
+    can_trash: bool,
+    remote: bool,
     search_status: QString,
     search_text: QString,
     search_kind: i32,
@@ -240,6 +254,9 @@ impl Default for FolderViewControllerRust {
             sort_column: SortColumn::Name.repr,
             sort_ascending: true,
             searching: false,
+            watched: false,
+            can_trash: false,
+            remote: false,
             search_status: QString::default(),
             search_text: QString::default(),
             search_kind: SearchKind::AnyKind.repr,
@@ -281,6 +298,21 @@ impl qobject::FolderViewController {
         match parse_location(&location.to_string(), &services.home) {
             Some(path) => self.navigate(path, HistoryMode::Record),
             None => self.set_error_message(QString::from(INVALID_LOCATION_MESSAGE)),
+        }
+    }
+
+    pub fn open_location_id(self: Pin<&mut Self>, location_id: &QString) {
+        match StoragePath::decode(&location_id.to_string()) {
+            Ok(path) => self.navigate(path, HistoryMode::Record),
+            Err(_) => self.set_error_message(QString::from(INVALID_LOCATION_MESSAGE)),
+        }
+    }
+
+    pub fn reload_if_showing(self: Pin<&mut Self>, folders: &QStringList) {
+        let current = self.location_id().to_string();
+        let showing = QList::<QString>::from(folders).iter().any(|f| f.to_string() == current);
+        if showing && !*self.watched() {
+            self.reload();
         }
     }
 
@@ -485,7 +517,13 @@ impl qobject::FolderViewController {
     }
 
     fn publish_location(mut self: Pin<&mut Self>, location: &StoragePath, home: &StoragePath) {
-        let title = location.name().map_or_else(|| ROOT_TITLE.to_owned(), ToString::to_string);
+        let title = location_title(location);
+        if let Some(services) = self.app_services() {
+            let capabilities = services.mounts.resolve(location.mount()).map(|m| m.capabilities()).unwrap_or_default();
+            self.as_mut().set_watched(capabilities.contains(Capability::Watch));
+            self.as_mut().set_can_trash(capabilities.contains(Capability::Trash));
+            self.as_mut().set_remote(capabilities.contains(Capability::Metered));
+        }
         let can_go_back = self.history.can_go_back();
         let can_go_forward = self.history.can_go_forward();
         self.as_mut().set_location(QString::from(&display_location(location, home)));
@@ -551,14 +589,34 @@ fn parse_location(text: &str, home: &StoragePath) -> Option<StoragePath> {
     StoragePath::parse(&format!("{}{SCHEME_SEPARATOR}{}/{text}", mount.scheme(), mount.authority())).ok()
 }
 
-/// Bare paths on the home mount, full locations for everything else.
+/// The folder's name; a bucket root is named after its bucket.
+fn location_title(location: &StoragePath) -> String {
+    match (location.name(), S3Location::of(location.mount())) {
+        (Some(name), _) => name.to_string(),
+        (None, Some(bucket)) => bucket.bucket.to_string(),
+        (None, None) => ROOT_TITLE.to_owned(),
+    }
+}
+
+/// Bare paths on the home mount, `bucket/path` in S3, full locations otherwise.
 fn display_location(location: &StoragePath, home: &StoragePath) -> String {
+    if let Some(bucket) = S3Location::of(location.mount()) {
+        return format!("{}{}", bucket.bucket, location.path_string());
+    }
     if location.mount() == home.mount() { location.path_string() } else { location.to_string() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s3_locations_read_as_bucket_paths() {
+        let home = StoragePath::parse("file:///Users/me").unwrap();
+        let object = StoragePath::parse("s3://3@photos/2024/beach").unwrap();
+        assert_eq!(display_location(&object, &home), "photos/2024/beach");
+        assert_eq!(location_title(&StoragePath::parse("s3://3@photos/").unwrap()), "photos");
+    }
 
     #[test]
     fn bare_paths_resolve_on_the_home_mount() {

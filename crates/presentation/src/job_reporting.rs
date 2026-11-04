@@ -1,12 +1,16 @@
 //! Port implementations that carry job events from worker threads to the
-//! Qt thread: throttled progress, and conflict questions awaiting an answer.
+//! Qt thread: throttled progress, and conflict and cost questions awaiting
+//! an answer.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use application::ports::{ConflictResolver, JobObserver};
+use application::ports::{ConflictResolver, CostConfirmer, JobObserver};
+use application::use_cases::ListS3Accounts;
 use cxx_qt::CxxQtThread;
-use domain::{Conflict, ConflictChoice, ConflictResolution, ConflictScope, JobProgress};
+use domain::{
+    AccountId, Conflict, ConflictChoice, ConflictResolution, ConflictScope, CostDecision, CostWarning, JobProgress,
+};
 use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
@@ -70,5 +74,44 @@ impl ConflictResolver for QtConflictResolver {
         // An unanswerable question (window closed, job cancelled) stops the job.
         let stop = ConflictResolution { choice: ConflictChoice::Stop, scope: ConflictScope::AllRemaining };
         answer.map(move |answer| answer.unwrap_or(stop)).boxed()
+    }
+}
+
+/// Asks about costs unless the user opted out for every account involved.
+pub(crate) struct QtCostConfirmer {
+    job_id: i32,
+    thread: CxxQtThread<OperationsController>,
+    accounts: Vec<AccountId>,
+    list_accounts: Arc<ListS3Accounts>,
+}
+
+impl QtCostConfirmer {
+    pub(crate) fn new(
+        job_id: i32,
+        thread: CxxQtThread<OperationsController>,
+        accounts: Vec<AccountId>,
+        list_accounts: Arc<ListS3Accounts>,
+    ) -> Self {
+        Self { job_id, thread, accounts, list_accounts }
+    }
+}
+
+impl CostConfirmer for QtCostConfirmer {
+    fn confirm(&self, warning: CostWarning) -> BoxFuture<'static, CostDecision> {
+        let (job_id, thread, accounts, list) =
+            (self.job_id, self.thread.clone(), self.accounts.clone(), Arc::clone(&self.list_accounts));
+        async move {
+            let stored = list.execute().await.unwrap_or_default();
+            let all_opted_out = !accounts.is_empty()
+                && accounts.iter().all(|id| stored.iter().any(|a| a.id == *id && a.skip_cost_warnings));
+            if all_opted_out {
+                return CostDecision::Proceed;
+            }
+            let (reply, answer) = oneshot::channel();
+            let _ = thread.queue(move |controller| controller.enqueue_cost(job_id, warning, accounts, reply));
+            // An unanswerable question (window closed, job cancelled) cancels the transfer.
+            answer.await.unwrap_or(CostDecision::Cancel)
+        }
+        .boxed()
     }
 }

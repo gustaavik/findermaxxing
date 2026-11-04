@@ -43,13 +43,35 @@ pub trait VfsFixture: Send + Sync {
 }
 
 mod mutation;
+mod stream;
 pub use mutation::*;
+pub use stream::*;
 
-/// Expands to one async test per contract case for the given fixture constructor.
+/// Listing and watching: what every local-style provider offers.
 #[macro_export]
 macro_rules! vfs_contract_tests {
-    ($make_fixture:expr) => {
-        $crate::vfs_contract_tests!(@cases $make_fixture;
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::lister_contract_tests!($make_fixture $(, #[$attr])*);
+        $crate::watcher_contract_tests!($make_fixture $(, #[$attr])*);
+    };
+    // One case per step: attributes and cases can't share a repetition depth.
+    (@cases $make_fixture:expr; [$($attrs:tt)*]; $case:ident $(, $rest:ident)* $(,)?) => {
+        #[$crate::__tokio::test(flavor = "multi_thread")]
+        $($attrs)*
+        async fn $case() {
+            let fixture = ($make_fixture)().await;
+            $crate::$case(&fixture).await;
+        }
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$($attrs)*]; $($rest),*);
+    };
+    (@cases $make_fixture:expr; [$($attrs:tt)*];) => {};
+}
+
+/// Listing cases. Extra attributes (e.g. `#[ignore = "needs MinIO"]`) apply to every case.
+#[macro_export]
+macro_rules! lister_contract_tests {
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$(#[$attr])*];
             empty_dir_lists_nothing,
             lists_children_with_kinds_and_sizes,
             missing_dir_is_not_found,
@@ -58,18 +80,18 @@ macro_rules! vfs_contract_tests {
             cancellation_ends_listing,
             stat_matches_listing,
             stat_missing_is_not_found,
+        );
+    };
+}
+
+/// Watching cases (providers that can notify about changes).
+#[macro_export]
+macro_rules! watcher_contract_tests {
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$(#[$attr])*];
             watch_missing_dir_is_not_found,
             watcher_reports_create_and_remove,
         );
-    };
-    (@cases $make_fixture:expr; $($case:ident),+ $(,)?) => {
-        $(
-            #[$crate::__tokio::test(flavor = "multi_thread")]
-            async fn $case() {
-                let fixture = ($make_fixture)().await;
-                $crate::$case(&fixture).await;
-            }
-        )+
     };
 }
 

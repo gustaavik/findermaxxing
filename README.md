@@ -3,10 +3,11 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 3.**
+**Status: milestone 4.**
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
+- M4: S3 and S3-compatible storage (AWS, R2, B2, Wasabi, MinIO, SeaweedFS) in a unified sidebar with places and favorites. Copy and move stream between providers, transfers that may cost money ask first, and secrets live in the OS keychain.
 
 ## Prerequisites
 
@@ -38,6 +39,16 @@ Without `QMAKE`, plain `cargo build` / `cargo test` only builds the Qt-free crat
 cargo xtask ci                                    # fmt, clippy -D warnings, tests, cargo-deny (Qt crates too if QMAKE is set)
 cargo test --release -p adapter-local-fs --test local_fs -- --ignored large_dir --nocapture   # 100k-file benchmark
 cargo xtask licenses                              # target/third-party-licenses.html
+```
+
+S3 contract tests need a server. CI uses SeaweedFS (MinIO's images are no longer pullable):
+
+```sh
+docker run -d --rm --name findermaxxing-s3 -p 127.0.0.1:8333:8333 chrislusf/seaweedfs \
+  server -s3 -dir=/data -volume.max=1000 -master.volumeSizeLimitMB=64
+cargo test -p adapter-s3 --test s3_contract -- --ignored     # FM_S3_TEST_ENDPOINT, _ACCESS_KEY, _SECRET_KEY override the defaults
+cargo test -p adapter-keyring -- --ignored                   # writes and deletes one item in your real keychain
+docker stop findermaxxing-s3
 ```
 
 ## Manually testing M1
@@ -85,6 +96,21 @@ cargo run -p app --release
   - Problems show in red and those items are skipped.
   - `Cmd/Ctrl+Z` undoes the whole batch.
 
+## Manually testing M4
+
+Start SeaweedFS as above (or use a real bucket), then `cargo run -p app --release`.
+
+- **Add an account:** *Add Cloud Storage…* at the bottom of the sidebar. Pick *MinIO / SeaweedFS*, endpoint `http://127.0.0.1:8333`, access key `fmtest` / `fmtest-secret-key`. A wrong secret or endpoint shows the error and saves nothing.
+- **Buckets:** they appear under the account. For a key that can't list buckets (or SeaweedFS without an identity config), right-click the account → *Add Bucket by Name…* and type a name (create it first with `aws --endpoint-url http://127.0.0.1:8333 s3 mb s3://demo`).
+- **Upload and download:** copy files in a local folder, paste in the bucket, and the other way round. Paste a file that exists to see the conflict prompt; on S3, *Replace* warns that it's permanent. A file over 8 MiB uploads in parallel parts; cancel it mid-way and nothing is left in the bucket.
+- **Cost warning:** copy something over 1 GB to or from the bucket. *Don't ask again for this account* sticks across restarts.
+- **No Trash on S3:** `Cmd+Backspace` / `Delete` offers permanent deletion with a confirmation. Undo is not offered afterwards.
+- **Undo:** undoing an upload deletes the uploaded objects; undoing a move back from S3 restores both sides.
+- **Get Info** (right-click): size, ETag and other facts, editable content type and user metadata, versions if the bucket has versioning, and *Create Link* for a presigned share link (up to 7 days).
+- **Open:** double-clicking an S3 file downloads it to `~/Library/Caches/FinderMaxxing/s3` (`~/.cache/FinderMaxxing/s3`) and opens it.
+- **Favorites:** right-click any folder, local or S3 → *Add to Sidebar*. Mounted volumes appear under *Locations*, accounts under *Cloud Storage*.
+- **Remove the account:** right-click → *Remove Account*. The keychain item goes with it (check *Keychain Access* for `FinderMaxxing`).
+
 ## Layout
 
 ```
@@ -92,11 +118,13 @@ crates/
   domain/                 pure entities and rules (StoragePath, FileEntry, SortSpec, VfsError, Capabilities)
   application/            ports (Lister, Watcher, Clock, ProviderFactory) + use cases + in-memory fakes
   vfs-contract-tests/     Liskov contract every provider must pass
-  adapter-local-fs/       file:// provider: listing, watching, copy/move/remove, platform trash, launcher
+  adapter-local-fs/       file:// provider: listing, watching, copy/move/remove, streams, platform trash, launcher, volumes
   adapter-preview/        syntax highlighting (syntect) and archive listings (zip, tar)
-  adapter-sqlite-store/   metadata store (SQLite): saved searches
+  adapter-s3/             s3:// provider (aws-sdk-s3): listing, server-side copy, streaming multipart upload, presign
+  adapter-keyring/        CredentialStore on the OS keychain (Keychain, Secret Service)
+  adapter-sqlite-store/   metadata store (SQLite): saved searches, S3 accounts, favorites
   adapter-tokio-runtime/  Clock on tokio
-  presentation/           cxx-qt controllers (folder view, operations, preview, bulk rename), C++ models,
+  presentation/           cxx-qt controllers (folder view, operations, preview, bulk rename, sidebar, item info), C++ models,
                           clipboard and Quick Look shims, QML
   app/                    composition root (the `findermaxxing` binary)
   arch-tests/             fails CI if layers point the wrong way

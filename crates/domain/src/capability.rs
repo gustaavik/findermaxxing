@@ -17,6 +17,14 @@ pub enum Capability {
     /// Provide a local file for an item (identity for local disks, a cached
     /// download for remote providers), used by previews.
     LocalAccess,
+    /// Requests and transfer are billed by the provider (S3 and friends).
+    Metered,
+    /// Shareable, expiring download links.
+    Presign,
+    /// Earlier versions of an item can be listed.
+    ListVersions,
+    /// Content type and custom metadata can be edited.
+    EditMetadata,
     /// Rename is a single atomic operation (false on S3: copy + delete).
     AtomicRename,
     ServerSideCopy,

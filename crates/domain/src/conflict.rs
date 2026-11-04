@@ -5,11 +5,13 @@ use crate::entry::FileEntry;
 pub struct Conflict {
     pub incoming: FileEntry,
     pub existing: FileEntry,
+    /// The destination has no Trash: replacing deletes the existing item for good.
+    pub replace_is_permanent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictChoice {
-    /// Move the existing item to the trash, then transfer (undoable).
+    /// Move the existing item to the trash (or, where there is none, delete it), then transfer.
     Replace,
     Skip,
     /// Transfer under a numbered name (`name 2.txt`).

@@ -10,8 +10,9 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 /// Infrastructure crates the inner layers must never depend on. A trailing
 /// `*` matches a prefix (`aws-*` covers every AWS SDK crate).
-pub const FORBIDDEN_IN_CORE: &[&str] =
-    &["cxx", "cxx-qt*", "qt-*", "tokio*", "rusqlite", "aws-*", "opendal", "notify", "ort", "reqwest", "hyper"];
+pub const FORBIDDEN_IN_CORE: &[&str] = &[
+    "cxx", "cxx-qt*", "qt-*", "tokio*", "rusqlite", "aws-*", "keyring", "opendal", "notify", "ort", "reqwest", "hyper",
+];
 
 /// Crates that must stay free of infrastructure.
 pub const CORE_CRATES: &[&str] = &["domain", "application"];

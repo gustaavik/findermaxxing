@@ -5,8 +5,10 @@ default-members = [
     "crates/domain",
     "crates/application",
     "crates/vfs-contract-tests",
+    "crates/adapter-keyring",
     "crates/adapter-local-fs",
     "crates/adapter-preview",
+    "crates/adapter-s3",
     "crates/adapter-sqlite-store",
     "crates/adapter-tokio-runtime",
     "crates/arch-tests",
@@ -16,8 +18,10 @@ members = [
     "crates/domain",
     "crates/application",
     "crates/vfs-contract-tests",
+    "crates/adapter-keyring",
     "crates/adapter-local-fs",
     "crates/adapter-preview",
+    "crates/adapter-s3",
     "crates/adapter-sqlite-store",
     "crates/adapter-tokio-runtime",
     "crates/presentation",
@@ -41,6 +45,8 @@ adapter-local-fs = { path = "crates/adapter-local-fs" }
 adapter-tokio-runtime = { path = "crates/adapter-tokio-runtime" }
 adapter-preview = { path = "crates/adapter-preview" }
 adapter-sqlite-store = { path = "crates/adapter-sqlite-store" }
+adapter-s3 = { path = "crates/adapter-s3" }
+adapter-keyring = { path = "crates/adapter-keyring" }
 presentation = { path = "crates/presentation" }
 
 thiserror = "2"
@@ -61,6 +67,11 @@ syntect = { version = "5.3", default-features = false, features = ["default-synt
 zip = { version = "9.3", default-features = false }
 tar = "0.4.46"
 flate2 = "1.1"
+aws-config = { version = "1.13", features = ["behavior-version-latest"] }
+# No default features: the default `rustls` feature adds a legacy hyper 0.14 / rustls 0.21
+# client (with open advisories) next to the modern one.
+aws-sdk-s3 = { version = "1.157", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
+keyring = "4.2"
 serde_json = "1"
 cxx = "1.0.205"
 cxx-qt = "0.10.0"

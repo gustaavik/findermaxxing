@@ -10,7 +10,10 @@ mod ffi {
 
         #[cxx_name = "clipboardUrls"]
         fn clipboard_urls() -> Vec<String>;
+
+        #[cxx_name = "setClipboardText"]
+        fn set_clipboard_text(text: &str);
     }
 }
 
-pub(crate) use ffi::{clipboard_urls, set_clipboard_urls};
+pub(crate) use ffi::{clipboard_urls, set_clipboard_text, set_clipboard_urls};

@@ -34,3 +34,8 @@ rust::Vec<rust::String> clipboardUrls()
     }
     return result;
 }
+
+void setClipboardText(rust::Str text)
+{
+    QGuiApplication::clipboard()->setText(QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size())));
+}

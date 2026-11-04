@@ -18,7 +18,8 @@ adapter-local-fs.workspace = true
 adapter-tokio-runtime.workspace = true
 adapter-preview.workspace = true
 adapter-sqlite-store.workspace = true
-futures.workspace = true
+adapter-s3.workspace = true
+adapter-keyring.workspace = true
 presentation.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 thiserror.workspace = true

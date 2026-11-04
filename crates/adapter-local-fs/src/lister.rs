@@ -30,6 +30,10 @@ impl LocalFs {
         Self { runtime }
     }
 
+    pub(crate) fn runtime(&self) -> &Handle {
+        &self.runtime
+    }
+
     /// Runs blocking filesystem work on the runtime's blocking pool.
     pub(crate) fn blocking<T: Send + 'static>(
         &self,

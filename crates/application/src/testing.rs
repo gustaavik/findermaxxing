@@ -6,21 +6,22 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use domain::{
-    ByteSize, Capabilities, Capability, ChangeEvent, Conflict, ConflictResolution, EntryBatch, EntryKind,
-    EntryMetadata, FileEntry, JobProgress, LIST_BATCH_SIZE, MountId, PathSegment, SavedSearch, SavedSearchId, Scheme,
-    StoragePath, TrashTicket, VfsError, Visibility,
+    AccountId, BucketName, ByteSize, Capabilities, Capability, ChangeEvent, Conflict, ConflictResolution, CostDecision,
+    CostWarning, EntryBatch, EntryKind, EntryMetadata, FileEntry, JobProgress, LIST_BATCH_SIZE, MountId, PathSegment,
+    S3Account, SavedSearch, SavedSearchId, Scheme, StoragePath, TrashTicket, VfsError, Visibility,
 };
-use futures::FutureExt;
 use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, Stream};
+use futures::{FutureExt, StreamExt};
 
 use crate::cancel::CancelToken;
 use crate::ports::{
-    ArchiveInspector, ArchiveItem, ArchiveListing, Clock, ConflictResolver, Copier, FolderMaker, JobObserver, Launcher,
-    Lister, LocalFile, Materializer, MountHandle, Mover, NewSavedSearch, PreviewFailure, PreviewTheme,
-    ProgressCallback, ProviderFactory, Remover, RenderedText, SavedSearchStore, StoreError, TextRenderer, Trasher,
-    Watcher,
+    AccountStore, ArchiveInspector, ArchiveItem, ArchiveListing, BucketInfo, ByteStream, Clock, ConflictResolver,
+    Copier, CostConfirmer, CredentialError, CredentialKey, CredentialStore, FavoritesStore, FolderMaker, JobObserver,
+    Launcher, Lister, LocalFile, LocalFileOpener, Materializer, MountHandle, Mover, NewS3Account, NewSavedSearch,
+    PreviewFailure, PreviewTheme, ProgressCallback, ProviderFactory, Reader, Remover, RenderedText, S3Connector,
+    SavedSearchStore, Secret, StoreError, TextRenderer, Trasher, Volume, VolumeLister, Watcher, WriteSink, Writer,
 };
 
 pub const FAKE_SCHEME: &str = "fake";
@@ -46,10 +47,21 @@ struct State {
     launched: Vec<StoragePath>,
 }
 
+/// How a fake mount presents itself to the application.
+#[derive(Debug, Clone)]
+struct FakeTraits {
+    scheme: String,
+    /// Behave like a billed remote provider: `Metered`, a region, no Trash,
+    /// no launcher (items open via their materialised copy).
+    remote: bool,
+    region: Option<String>,
+}
+
 /// An in-memory filesystem under the `fake://` scheme. Clones share state.
 #[derive(Debug, Clone)]
 pub struct FakeVfs {
     state: Arc<Mutex<State>>,
+    traits: Arc<FakeTraits>,
 }
 
 impl Default for FakeVfs {
@@ -61,7 +73,17 @@ impl Default for FakeVfs {
 impl FakeVfs {
     #[must_use]
     pub fn new() -> Self {
-        let fake = Self { state: Arc::default() };
+        Self::with_traits(FakeTraits { scheme: FAKE_SCHEME.to_owned(), remote: false, region: None })
+    }
+
+    /// A second, remote-like provider (think S3) under its own scheme.
+    #[must_use]
+    pub fn remote(scheme: &str, region: Option<&str>) -> Self {
+        Self::with_traits(FakeTraits { scheme: scheme.to_owned(), remote: true, region: region.map(str::to_owned) })
+    }
+
+    fn with_traits(traits: FakeTraits) -> Self {
+        let fake = Self { state: Arc::default(), traits: Arc::new(traits) };
         let root = fake.path("/");
         fake.lock()
             .nodes
@@ -72,7 +94,7 @@ impl FakeVfs {
     /// `fake://` + `absolute`. Invalid input is a bug in the test itself.
     #[must_use]
     pub fn path(&self, absolute: &str) -> StoragePath {
-        match StoragePath::parse(&format!("{FAKE_SCHEME}://{absolute}")) {
+        match StoragePath::parse(&format!("{}://{absolute}", self.traits.scheme)) {
             Ok(path) => path,
             Err(error) => unreachable_in_tests(&error),
         }
@@ -351,7 +373,7 @@ impl Trasher for FakeVfs {
         let mut state = self.lock();
         state.trashed_count += 1;
         let slot = PathSegment::new(&state.trashed_count.to_string())?;
-        let trashed = StoragePath::parse(&format!("{FAKE_SCHEME}://{TRASH_ROOT}"))?.join(slot).join(name);
+        let trashed = self.path(TRASH_ROOT).join(slot).join(name);
         let tree = Self::take_tree(&mut state, path);
         state.trash.insert(trashed.clone(), tree);
         Ok(TrashTicket { original: path.clone(), trashed })
@@ -383,7 +405,8 @@ pub const FAKE_LOCAL_ROOT: &str = "/fake-local";
 impl Materializer for FakeVfs {
     async fn local_file(&self, item: &StoragePath) -> Result<LocalFile, VfsError> {
         self.node(item)?;
-        Ok(LocalFile::new(std::path::PathBuf::from(format!("{FAKE_LOCAL_ROOT}{}", item.path_string()))))
+        let root = format!("{FAKE_LOCAL_ROOT}/{}", self.traits.scheme);
+        Ok(LocalFile::new(std::path::PathBuf::from(format!("{root}{}", item.path_string()))))
     }
 }
 
@@ -394,7 +417,7 @@ struct FakeFactory {
 
 impl ProviderFactory for FakeFactory {
     fn scheme(&self) -> Scheme {
-        match Scheme::new(FAKE_SCHEME) {
+        match Scheme::new(&self.fake.traits.scheme) {
             Ok(scheme) => scheme,
             Err(error) => unreachable_in_tests(&error),
         }
@@ -402,17 +425,75 @@ impl ProviderFactory for FakeFactory {
 
     fn open(&self, _mount: &MountId) -> Result<MountHandle, VfsError> {
         let fake = Arc::new(self.fake.clone());
-        Ok(MountHandle::builder(Capabilities::empty().with(Capability::AtomicRename))
+        let traits = &self.fake.traits;
+        let semantics = if traits.remote {
+            Capabilities::empty().with(Capability::Metered)
+        } else {
+            Capabilities::empty().with(Capability::AtomicRename)
+        };
+        let builder = MountHandle::builder(semantics)
+            .region(traits.region.clone())
             .lister(fake.clone())
             .watcher(fake.clone())
             .copier(fake.clone())
             .mover(fake.clone())
             .remover(fake.clone())
             .folder_maker(fake.clone())
-            .trasher(fake.clone())
-            .launcher(fake.clone())
-            .materializer(fake)
-            .build())
+            .reader(fake.clone())
+            .writer(fake.clone())
+            .materializer(fake.clone());
+        Ok(if traits.remote { builder } else { builder.trasher(fake.clone()).launcher(fake) }.build())
+    }
+}
+
+/// Fake reads arrive in chunks this small so multi-chunk paths get exercised.
+const FAKE_READ_CHUNK: usize = 4;
+
+impl Reader for FakeVfs {
+    async fn read(&self, path: &StoragePath, _cancel: CancelToken) -> Result<ByteStream, VfsError> {
+        self.check_failure(path)?;
+        let node = self.node(path)?;
+        if node.kind.is_container() {
+            return Err(VfsError::IsADirectory);
+        }
+        let chunks: Vec<Result<Vec<u8>, VfsError>> =
+            node.content.chunks(FAKE_READ_CHUNK).map(|chunk| Ok(chunk.to_vec())).collect();
+        Ok(stream::iter(chunks).boxed())
+    }
+}
+
+impl Writer for FakeVfs {
+    async fn create(&self, path: &StoragePath, _size_hint: Option<ByteSize>) -> Result<Box<dyn WriteSink>, VfsError> {
+        self.check_failure(path)?;
+        self.require_absent(path)?;
+        self.require_parent_dir(path)?;
+        Ok(Box::new(FakeSink { fake: self.clone(), path: path.clone(), buffer: Vec::new() }))
+    }
+}
+
+/// Buffers until commit, so nothing is visible before then.
+struct FakeSink {
+    fake: FakeVfs,
+    path: StoragePath,
+    buffer: Vec<u8>,
+}
+
+impl WriteSink for FakeSink {
+    fn write(&mut self, chunk: Vec<u8>) -> BoxFuture<'_, Result<(), VfsError>> {
+        self.buffer.extend(chunk);
+        future::ready(Ok(())).boxed()
+    }
+
+    fn commit(self: Box<Self>) -> BoxFuture<'static, Result<(), VfsError>> {
+        let result = self.fake.require_absent(&self.path).map(|()| {
+            let committed = node(&self.path, EntryKind::File, self.buffer);
+            self.fake.insert(&self.path, committed);
+        });
+        future::ready(result).boxed()
+    }
+
+    fn abort(self: Box<Self>) -> BoxFuture<'static, ()> {
+        future::ready(()).boxed()
     }
 }
 
@@ -525,6 +606,244 @@ impl SavedSearchStore for InMemorySavedSearches {
 
     fn delete(&self, id: SavedSearchId) -> BoxFuture<'static, Result<(), StoreError>> {
         self.searches.lock().unwrap_or_else(PoisonError::into_inner).retain(|s| s.id != id);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// Answers every cost question the same way and remembers what it was shown.
+#[derive(Debug)]
+pub struct ScriptedCosts {
+    decision: CostDecision,
+    shown: Mutex<Vec<CostWarning>>,
+}
+
+impl ScriptedCosts {
+    #[must_use]
+    pub fn new(decision: CostDecision) -> Self {
+        Self { decision, shown: Mutex::default() }
+    }
+
+    #[must_use]
+    pub fn warnings(&self) -> Vec<CostWarning> {
+        self.shown.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl CostConfirmer for ScriptedCosts {
+    fn confirm(&self, warning: CostWarning) -> BoxFuture<'static, CostDecision> {
+        self.shown.lock().unwrap_or_else(PoisonError::into_inner).push(warning);
+        future::ready(self.decision).boxed()
+    }
+}
+
+/// Accounts in memory.
+#[derive(Debug, Default)]
+pub struct InMemoryAccounts {
+    accounts: Mutex<Vec<S3Account>>,
+}
+
+impl InMemoryAccounts {
+    #[must_use]
+    pub fn all(&self) -> Vec<S3Account> {
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl AccountStore for InMemoryAccounts {
+    fn list_s3(&self) -> BoxFuture<'static, Result<Vec<S3Account>, StoreError>> {
+        future::ready(Ok(self.all())).boxed()
+    }
+
+    fn add_s3(&self, account: NewS3Account) -> BoxFuture<'static, Result<S3Account, StoreError>> {
+        let mut accounts = self.accounts.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = AccountId(accounts.iter().map(|a| a.id.0).max().unwrap_or_default() + 1);
+        let added = S3Account {
+            id,
+            name: account.name,
+            endpoint: account.endpoint,
+            region: account.region,
+            auth: account.auth,
+            addressing: account.addressing,
+            skip_cost_warnings: false,
+            extra_buckets: Vec::new(),
+        };
+        accounts.push(added.clone());
+        future::ready(Ok(added)).boxed()
+    }
+
+    fn remove(&self, id: AccountId) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.accounts.lock().unwrap_or_else(PoisonError::into_inner).retain(|a| a.id != id);
+        future::ready(Ok(())).boxed()
+    }
+
+    fn set_skip_cost_warnings(&self, id: AccountId, skip: bool) -> BoxFuture<'static, Result<(), StoreError>> {
+        for account in self.accounts.lock().unwrap_or_else(PoisonError::into_inner).iter_mut().filter(|a| a.id == id) {
+            account.skip_cost_warnings = skip;
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn add_bucket(&self, id: AccountId, bucket: BucketName) -> BoxFuture<'static, Result<(), StoreError>> {
+        for account in self.accounts.lock().unwrap_or_else(PoisonError::into_inner).iter_mut().filter(|a| a.id == id) {
+            if !account.extra_buckets.contains(&bucket) {
+                account.extra_buckets.push(bucket.clone());
+            }
+        }
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// A keychain in memory.
+#[derive(Debug, Default)]
+pub struct InMemoryKeychain {
+    secrets: Mutex<HashMap<CredentialKey, Secret>>,
+}
+
+impl InMemoryKeychain {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.secrets.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl CredentialStore for InMemoryKeychain {
+    fn store(&self, key: &CredentialKey, secret: &Secret) -> BoxFuture<'static, Result<(), CredentialError>> {
+        self.secrets.lock().unwrap_or_else(PoisonError::into_inner).insert(key.clone(), secret.clone());
+        future::ready(Ok(())).boxed()
+    }
+
+    fn load(&self, key: &CredentialKey) -> BoxFuture<'static, Result<Option<Secret>, CredentialError>> {
+        future::ready(Ok(self.secrets.lock().unwrap_or_else(PoisonError::into_inner).get(key).cloned())).boxed()
+    }
+
+    fn delete(&self, key: &CredentialKey) -> BoxFuture<'static, Result<(), CredentialError>> {
+        self.secrets.lock().unwrap_or_else(PoisonError::into_inner).remove(key);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// Connects any account whose secret (if any) is `"correct"`; every
+/// connected account has the given buckets (or, if `deny_listing`, may not list them).
+#[derive(Debug, Default)]
+pub struct FakeS3Connector {
+    buckets: Vec<String>,
+    connected: Mutex<Vec<AccountId>>,
+    deny_listing: bool,
+}
+
+impl FakeS3Connector {
+    pub const VALID_SECRET: &'static str = "correct";
+
+    #[must_use]
+    pub fn with_buckets(buckets: &[&str]) -> Self {
+        Self {
+            buckets: buckets.iter().map(|b| (*b).to_owned()).collect(),
+            connected: Mutex::default(),
+            deny_listing: false,
+        }
+    }
+
+    /// Like a scoped IAM key: connects, but ListBuckets is denied.
+    #[must_use]
+    pub fn denying_listing() -> Self {
+        Self { deny_listing: true, ..Self::default() }
+    }
+
+    #[must_use]
+    pub fn connected(&self) -> Vec<AccountId> {
+        self.connected.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl S3Connector for FakeS3Connector {
+    fn connect(&self, account: &S3Account, secret: Option<Secret>) -> BoxFuture<'static, Result<(), VfsError>> {
+        let valid = secret.as_ref().is_none_or(|s| s.expose() == Self::VALID_SECRET);
+        let result = if valid {
+            self.connected.lock().unwrap_or_else(PoisonError::into_inner).push(account.id);
+            Ok(())
+        } else {
+            Err(VfsError::PermissionDenied)
+        };
+        future::ready(result).boxed()
+    }
+
+    fn disconnect(&self, id: AccountId) {
+        self.connected.lock().unwrap_or_else(PoisonError::into_inner).retain(|c| *c != id);
+    }
+
+    fn list_buckets(&self, id: AccountId) -> BoxFuture<'static, Result<Vec<BucketInfo>, VfsError>> {
+        let connected = self.connected.lock().unwrap_or_else(PoisonError::into_inner).contains(&id);
+        let buckets = self
+            .buckets
+            .iter()
+            .filter_map(|name| BucketName::new(name).ok())
+            .map(|name| BucketInfo { name, region: None })
+            .collect();
+        let result = match (connected, self.deny_listing) {
+            (false, _) => Err(VfsError::NotFound),
+            (true, true) => Err(VfsError::PermissionDenied),
+            (true, false) => Ok(buckets),
+        };
+        future::ready(result).boxed()
+    }
+}
+
+/// Favourites in memory, in insertion order.
+#[derive(Debug, Default)]
+pub struct InMemoryFavorites {
+    locations: Mutex<Vec<StoragePath>>,
+}
+
+impl FavoritesStore for InMemoryFavorites {
+    fn list(&self) -> BoxFuture<'static, Result<Vec<StoragePath>, StoreError>> {
+        future::ready(Ok(self.locations.lock().unwrap_or_else(PoisonError::into_inner).clone())).boxed()
+    }
+
+    fn add(&self, location: StoragePath) -> BoxFuture<'static, Result<(), StoreError>> {
+        let mut locations = self.locations.lock().unwrap_or_else(PoisonError::into_inner);
+        if !locations.contains(&location) {
+            locations.push(location);
+        }
+        future::ready(Ok(())).boxed()
+    }
+
+    fn remove(&self, location: StoragePath) -> BoxFuture<'static, Result<(), StoreError>> {
+        self.locations.lock().unwrap_or_else(PoisonError::into_inner).retain(|l| *l != location);
+        future::ready(Ok(())).boxed()
+    }
+}
+
+/// A fixed list of volumes.
+#[derive(Debug, Default)]
+pub struct FixedVolumes(pub Vec<Volume>);
+
+impl VolumeLister for FixedVolumes {
+    fn volumes(&self) -> BoxFuture<'static, Vec<Volume>> {
+        future::ready(self.0.clone()).boxed()
+    }
+}
+
+/// Records opened local files.
+#[derive(Debug, Default)]
+pub struct RecordingOpener {
+    opened: Mutex<Vec<LocalFile>>,
+}
+
+impl RecordingOpener {
+    #[must_use]
+    pub fn opened(&self) -> Vec<LocalFile> {
+        self.opened.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl LocalFileOpener for RecordingOpener {
+    fn open(&self, file: &LocalFile) -> BoxFuture<'static, Result<(), VfsError>> {
+        self.opened.lock().unwrap_or_else(PoisonError::into_inner).push(file.clone());
         future::ready(Ok(())).boxed()
     }
 }

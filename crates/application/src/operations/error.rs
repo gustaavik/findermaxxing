@@ -10,7 +10,7 @@ pub enum OperationError {
     Stopped,
     #[error("a folder cannot be moved or copied into itself ({item})")]
     IntoItself { item: StoragePath },
-    #[error("transfers between different storage locations are not supported yet")]
+    #[error("items on different storage locations can't be renamed together")]
     CrossMount,
     #[error("there is nothing to undo")]
     NothingToUndo,

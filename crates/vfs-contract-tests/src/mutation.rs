@@ -13,8 +13,8 @@ use crate::{VfsFixture, child, list_all};
 /// Expands to the copy/move/remove/create-folder contract cases.
 #[macro_export]
 macro_rules! mutation_contract_tests {
-    ($make_fixture:expr) => {
-        $crate::vfs_contract_tests!(@cases $make_fixture;
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$(#[$attr])*];
             copy_item_copies_bytes_and_reports_progress,
             copy_item_never_overwrites,
             copy_item_rejects_directories,
@@ -24,6 +24,7 @@ macro_rules! mutation_contract_tests {
             rename_never_overwrites,
             rename_can_change_only_letter_case,
             rename_missing_source_is_not_found,
+            renamed_folders_leave_nothing_behind,
             remove_deletes_whole_trees,
             remove_missing_is_not_found,
             create_folder_creates_once,
@@ -36,8 +37,8 @@ macro_rules! mutation_contract_tests {
 /// for local adapters and restore everything they trash.
 #[macro_export]
 macro_rules! trash_contract_tests {
-    ($make_fixture:expr) => {
-        $crate::vfs_contract_tests!(@cases $make_fixture;
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$(#[$attr])*];
             trash_then_restore_round_trips,
             restore_onto_an_occupied_place_is_already_exists,
             restoring_twice_is_not_in_trash,
@@ -252,4 +253,19 @@ where
 
 fn segment(name: &str) -> domain::PathSegment {
     domain::PathSegment::new(name).unwrap()
+}
+
+/// Renaming a folder leaves nothing at the old name (S3: no stray prefixes).
+pub async fn renamed_folders_leave_nothing_behind<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Mover + Lister,
+{
+    fixture.create_dir("old").await;
+    fixture.create_dir("old/inner").await;
+    fixture.create_file("old/inner/f", b"x").await;
+    fixture.vfs().rename(&child(fixture, "old"), &child(fixture, "new")).await.unwrap();
+    let names: Vec<String> =
+        list_all(fixture, &fixture.root()).await.unwrap().iter().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, ["new"]);
+    assert_eq!(fixture.read_file("new/inner/f").await.as_deref(), Some(b"x".as_slice()));
 }

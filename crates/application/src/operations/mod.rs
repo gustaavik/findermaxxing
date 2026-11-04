@@ -11,6 +11,6 @@ pub(crate) mod relocate;
 pub(crate) mod scan;
 pub(crate) mod transfer;
 
-pub use context::{JobContext, NullObserver};
+pub use context::{AcceptCosts, JobContext, NullObserver};
 pub use error::{OperationError, OperationReport};
 pub use history::{HISTORY_LIMIT, HistoryEntry, OperationHistory};

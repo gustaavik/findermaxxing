@@ -58,3 +58,8 @@ mod trash {
     use super::fixture;
     vfs_contract_tests::trash_contract_tests!(fixture);
 }
+
+mod stream {
+    use super::fixture;
+    vfs_contract_tests::stream_contract_tests!(fixture);
+}

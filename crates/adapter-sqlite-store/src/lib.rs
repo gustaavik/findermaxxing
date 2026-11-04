@@ -1,8 +1,12 @@
-//! SQLite-backed metadata store. Implements `SavedSearchStore`.
+//! SQLite-backed metadata store. Implements `SavedSearchStore`,
+//! `AccountStore` (settings only: secrets live in the OS keychain) and
+//! `FavoritesStore`.
 //!
 //! The schema is versioned with `PRAGMA user_version`; each entry of
 //! [`MIGRATIONS`] runs exactly once, in order, inside a transaction.
 
+mod accounts;
+mod favorites;
 mod query_format;
 
 use std::path::Path;
@@ -15,12 +19,46 @@ use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use tokio::runtime::Handle;
 
-const MIGRATIONS: &[&str] = &["CREATE TABLE saved_searches (
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE saved_searches (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         scope TEXT NOT NULL,
         query TEXT NOT NULL
-    );"];
+    );",
+    "CREATE TABLE s3_accounts (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        endpoint TEXT,
+        region TEXT,
+        auth_kind TEXT NOT NULL,
+        auth_value TEXT,
+        addressing TEXT NOT NULL,
+        skip_cost_warnings INTEGER NOT NULL DEFAULT 0
+    );",
+    "CREATE TABLE favorites (
+        location TEXT PRIMARY KEY,
+        position INTEGER NOT NULL
+    );",
+    "ALTER TABLE s3_accounts ADD COLUMN extra_buckets TEXT NOT NULL DEFAULT '';",
+    // Account ids name keychain items, so they must never be reused: a new
+    // account must not inherit a stale secret left by a removed one.
+    "CREATE TABLE s3_accounts_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        endpoint TEXT,
+        region TEXT,
+        auth_kind TEXT NOT NULL,
+        auth_value TEXT,
+        addressing TEXT NOT NULL,
+        skip_cost_warnings INTEGER NOT NULL DEFAULT 0,
+        extra_buckets TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO s3_accounts_v2 SELECT id, name, endpoint, region, auth_kind, auth_value, addressing,
+        skip_cost_warnings, extra_buckets FROM s3_accounts;
+    DROP TABLE s3_accounts;
+    ALTER TABLE s3_accounts_v2 RENAME TO s3_accounts;",
+];
 
 /// One connection, serialised by a mutex: metadata writes are rare and tiny.
 #[derive(Clone)]
@@ -54,7 +92,7 @@ impl SqliteStore {
         Ok(Self { connection: Arc::new(Mutex::new(connection)), runtime })
     }
 
-    fn run<T: Send + 'static>(
+    pub(crate) fn run<T: Send + 'static>(
         &self,
         work: impl FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
     ) -> BoxFuture<'static, Result<T, StoreError>> {
@@ -145,7 +183,7 @@ impl StoredRow {
     }
 }
 
-fn unavailable(error: &dyn std::fmt::Display) -> StoreError {
+pub(crate) fn unavailable(error: &dyn std::fmt::Display) -> StoreError {
     StoreError::Unavailable(error.to_string())
 }
 

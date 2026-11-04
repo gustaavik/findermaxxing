@@ -26,6 +26,14 @@ jobs:
           tool: cargo-deny,cargo-about
       - run: cargo xtask ci
       - run: cargo xtask licenses
+      - name: Start SeaweedFS (S3)
+        run: |
+          docker run -d --rm --name findermaxxing-s3 -p 127.0.0.1:8333:8333 chrislusf/seaweedfs \
+            server -s3 -dir=/data -volume.max=1000 -master.volumeSizeLimitMB=64
+          for _ in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:8333 && exit 0; sleep 1; done
+          docker logs findermaxxing-s3; exit 1
+      - name: S3 contract tests
+        run: cargo test -p adapter-s3 --test s3_contract -- --ignored
       - uses: actions/upload-artifact@v4
         with:
           name: third-party-licenses

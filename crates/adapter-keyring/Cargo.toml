@@ -1,0 +1,20 @@
+[package]
+name = "adapter-keyring"
+description = "CredentialStore on the OS keychain: macOS Keychain, Secret Service on Linux."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+keyring.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

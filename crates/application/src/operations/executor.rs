@@ -9,16 +9,33 @@ use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
 use super::progress::ProgressTracker;
 use super::relocate::{needs_staging, rename_batch};
-use super::transfer::move_item;
+use super::scan::scan;
+use super::transfer::{Route, move_across, move_item};
 use crate::ports::MountResolver;
 
-pub(crate) async fn execute(mounts: &dyn MountResolver, action: &Action, ctx: &JobContext) -> OperationReport {
+/// What "trash" means on a location without a Trash (S3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoTrash {
+    /// User-initiated trashing: refuse (`Unsupported(Trash)`); the UI then
+    /// offers an explicit permanent delete.
+    Refuse,
+    /// Undoing a copy or a new folder: delete what that operation created.
+    /// The originals of a copy still exist, so nothing the user had is lost.
+    DeleteCreated,
+}
+
+pub(crate) async fn execute(
+    mounts: &dyn MountResolver,
+    action: &Action,
+    no_trash: NoTrash,
+    ctx: &JobContext,
+) -> OperationReport {
     let tracker = ProgressTracker::new(Arc::clone(&ctx.observer));
     let steps = flatten(action);
     tracker.begin(steps.iter().map(step_items).sum(), ByteSize(0));
     let mut done = Vec::with_capacity(steps.len());
     for step in &steps {
-        let (operation, result) = run_step(mounts, step, &tracker, ctx).await;
+        let (operation, result) = run_step(mounts, step, no_trash, &tracker, ctx).await;
         done.push(operation);
         if let Err(error) = result {
             return OperationReport::new(Operation::sequence(done), Err(error));
@@ -49,40 +66,63 @@ type StepOutcome = (Operation, Result<(), OperationError>);
 async fn run_step(
     mounts: &dyn MountResolver,
     step: &Action,
+    no_trash: NoTrash,
     tracker: &Arc<ProgressTracker>,
     ctx: &JobContext,
 ) -> StepOutcome {
     match step {
-        Action::Trash(paths) => trash_all(mounts, paths, tracker, ctx).await,
+        Action::Trash(paths) => trash_all(mounts, paths, no_trash, tracker, ctx).await,
         Action::Restore(tickets) => restore_all(mounts, tickets, tracker, ctx).await,
         Action::Move(moves) => move_all(mounts, moves, tracker, ctx).await,
         Action::Sequence(_) => (Operation::sequence(Vec::new()), Ok(())),
     }
 }
 
+enum Disposal {
+    Trashed(TrashTicket),
+    Deleted,
+}
+
 async fn trash_all(
     mounts: &dyn MountResolver,
     paths: &[StoragePath],
+    no_trash: NoTrash,
     tracker: &ProgressTracker,
     ctx: &JobContext,
 ) -> StepOutcome {
     let mut tickets = Vec::with_capacity(paths.len());
+    let mut deleted = Vec::new();
+    let outcome =
+        |tickets, deleted| Operation::sequence(vec![Operation::Trashed(tickets), Operation::Deleted(deleted)]);
     for path in paths {
         if ctx.cancel.is_cancelled() {
-            return (Operation::Trashed(tickets), Err(OperationError::Cancelled));
+            return (outcome(tickets, deleted), Err(OperationError::Cancelled));
         }
         tracker.item_started(path.name());
-        let trashed = match mounts.resolve(path.mount()).and_then(|mount| mount.trasher()) {
-            Ok(trasher) => trasher.trash_boxed(path).await,
-            Err(error) => Err(error),
-        };
-        match trashed {
-            Ok(ticket) => tickets.push(ticket),
-            Err(error) => return (Operation::Trashed(tickets), Err(OperationError::on(path)(error))),
+        match dispose(mounts, path, no_trash, ctx).await {
+            Ok(Disposal::Trashed(ticket)) => tickets.push(ticket),
+            Ok(Disposal::Deleted) => deleted.push(path.clone()),
+            Err(error) => return (outcome(tickets, deleted), Err(OperationError::on(path)(error))),
         }
         tracker.item_finished();
     }
-    (Operation::Trashed(tickets), Ok(()))
+    (outcome(tickets, deleted), Ok(()))
+}
+
+async fn dispose(
+    mounts: &dyn MountResolver,
+    path: &StoragePath,
+    no_trash: NoTrash,
+    ctx: &JobContext,
+) -> Result<Disposal, domain::VfsError> {
+    let mount = mounts.resolve(path.mount())?;
+    match (mount.trasher(), no_trash) {
+        (Ok(trasher), _) => trasher.trash_boxed(path).await.map(Disposal::Trashed),
+        (Err(error), NoTrash::Refuse) => Err(error),
+        (Err(_), NoTrash::DeleteCreated) => {
+            mount.remover()?.remove_boxed(path, ctx.cancel.clone()).await.map(|()| Disposal::Deleted)
+        }
+    }
 }
 
 async fn restore_all(
@@ -140,12 +180,17 @@ async fn move_one(
     tracker: &Arc<ProgressTracker>,
     ctx: &JobContext,
 ) -> Result<(), OperationError> {
-    if relocation.from.mount() != relocation.to.mount() {
-        return Err(OperationError::CrossMount);
+    let from = &relocation.from;
+    let source = mounts.resolve(from.mount()).map_err(OperationError::on(from))?;
+    let lister = source.lister().map_err(OperationError::on(from))?;
+    let entry = lister.stat_boxed(from).await.map_err(OperationError::on(from))?;
+    if from.mount() == relocation.to.mount() {
+        return move_item(&source, &entry, &relocation.to, tracker, &ctx.cancel).await;
     }
-    let on_source = OperationError::on(&relocation.from);
-    let handle = mounts.resolve(relocation.from.mount()).map_err(OperationError::on(&relocation.from))?;
-    let lister = handle.lister().map_err(OperationError::on(&relocation.from))?;
-    let entry = lister.stat_boxed(&relocation.from).await.map_err(on_source)?;
-    move_item(&handle, &entry, &relocation.to, tracker, &ctx.cancel).await
+    // E.g. undoing a move from a local folder into a bucket.
+    let dest = mounts.resolve(relocation.to.mount()).map_err(OperationError::on(&relocation.to))?;
+    let tree = scan(&*lister, entry.clone(), &ctx.cancel).await.map_err(OperationError::on(from))?;
+    tracker.add_totals(tree.item_count().saturating_sub(1), tree.bytes);
+    let route = Route { source: &source, dest: &dest, same_mount: false };
+    move_across(&route, &entry, &tree, &relocation.to, tracker, &ctx.cancel).await
 }

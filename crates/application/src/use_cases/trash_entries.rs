@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use domain::{Action, OperationKind, StoragePath};
 
-use crate::operations::{JobContext, OperationError, OperationHistory, OperationReport, executor};
+use crate::operations::executor::{self, NoTrash};
+use crate::operations::{JobContext, OperationError, OperationHistory, OperationReport};
 use crate::ports::MountResolver;
 
 /// Moves items to the platform trash. Undo puts them back where they were.
@@ -18,7 +19,7 @@ impl TrashEntries {
     }
 
     pub async fn execute(&self, items: &[StoragePath], ctx: &JobContext) -> OperationReport {
-        let report = executor::execute(&*self.mounts, &Action::Trash(items.to_vec()), ctx).await;
+        let report = executor::execute(&*self.mounts, &Action::Trash(items.to_vec()), NoTrash::Refuse, ctx).await;
         self.history.record(OperationKind::Trash, report.done.clone());
         report
     }

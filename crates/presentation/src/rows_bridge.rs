@@ -29,6 +29,21 @@ pub(crate) mod ffi {
         determinate: bool,
     }
 
+    /// One sidebar line: a heading, a place, or an account with its buckets.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SidebarRow {
+        /// A `SidebarController::RowKind` value.
+        kind: i32,
+        label: String,
+        /// Secondary text (an account's connection problem); usually empty.
+        detail: String,
+        /// Lossless location to open; empty for headings and accounts.
+        location: String,
+        icon_name: String,
+        /// The S3 account an account or bucket row belongs to; 0 otherwise.
+        account_id: i64,
+    }
+
     extern "Rust" {
         fn rows_insert(rows: &mut Vec<EntryRow>, index: usize, row: EntryRow);
         fn rows_remove(rows: &mut Vec<EntryRow>, index: usize);
@@ -36,9 +51,10 @@ pub(crate) mod ffi {
     }
 
     impl Vec<EntryRow> {}
+    impl Vec<SidebarRow> {}
 }
 
-pub(crate) use ffi::{EntryRow, JobRow};
+pub(crate) use ffi::{EntryRow, JobRow, SidebarRow};
 
 // The C++ model checks bounds before calling these; out-of-range indices
 // are ignored rather than panicking across the FFI boundary. Signatures take

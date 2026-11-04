@@ -12,6 +12,7 @@ FocusScope {
 
     required property ServicesHolder services
     required property OperationsController operations
+    required property SidebarController sidebar
     readonly property alias controller: controller
     readonly property var entries: controller.model
 
@@ -89,7 +90,17 @@ FocusScope {
     }
 
     function trashSelection() {
-        operations.moveToTrash(selection())
+        // No Trash here (S3): never delete silently; ask for a permanent delete.
+        if (controller.canTrash) {
+            operations.moveToTrash(selection())
+        } else {
+            confirmPermanentDelete()
+        }
+    }
+
+    function selectedOrCurrentFolder() {
+        const row = list.currentIndex
+        return entries.selectedCount === 1 && entries.isSelected(row) ? entries.locationAt(row) : controller.locationId
     }
 
     function confirmPermanentDelete() {
@@ -163,6 +174,11 @@ FocusScope {
 
     PreviewController {
         id: preview
+        services: root.services
+    }
+
+    InfoDialog {
+        id: info
         services: root.services
     }
 
@@ -585,6 +601,17 @@ FocusScope {
             onTriggered: root.startRename(list.currentIndex)
         }
         MenuItem {
+            text: qsTr("Get Info…")
+            visible: controller.remote
+            height: visible ? implicitHeight : 0
+            enabled: contextMenu.singleSelection
+            onTriggered: info.openFor(root.entries.locationAt(list.currentIndex), root.entries.nameAt(list.currentIndex))
+        }
+        MenuItem {
+            text: qsTr("Add to Sidebar")
+            onTriggered: root.sidebar.addFavorite(root.selectedOrCurrentFolder())
+        }
+        MenuItem {
             text: qsTr("Quick Look")
             enabled: contextMenu.hasSelection
             onTriggered: root.quickLook()
@@ -607,6 +634,8 @@ FocusScope {
         MenuSeparator {}
         MenuItem {
             text: qsTr("Move to Trash")
+            visible: controller.canTrash
+            height: visible ? implicitHeight : 0
             enabled: contextMenu.hasSelection
             onTriggered: root.trashSelection()
         }
@@ -639,13 +668,17 @@ FocusScope {
 
         parent: Overlay.overlay
         anchors.centerIn: parent
+        width: Math.min(440, parent.width - 32)
         modal: true
         title: locations.length === 1
                ? qsTr("Delete “%1” immediately?").arg(root.entries.nameAt(root.entries.rowOfLocation(locations[0])))
                : qsTr("Delete %1 items immediately?").arg(locations.length)
 
         Label {
-            text: qsTr("You can't undo this action.")
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: controller.canTrash ? qsTr("You can't undo this action.")
+                                      : qsTr("This location has no Trash. You can't undo this action.")
         }
 
         footer: DialogButtonBox {

@@ -10,10 +10,12 @@ flowchart RL
     end
     application --> domain
 
-    local["adapter-local-fs<br/><i>Lister, Watcher, Copier, Mover,<br/>Remover, FolderMaker, Trasher, Launcher</i>"] --> application
+    local["adapter-local-fs<br/><i>Lister, Watcher, Copier, Mover,<br/>Remover, FolderMaker, Trasher, Launcher,<br/>Reader, Writer, VolumeLister, LocalFileOpener</i>"] --> application
     tokio_rt["adapter-tokio-runtime<br/><i>Clock</i>"] --> application
     preview["adapter-preview<br/><i>TextRenderer, ArchiveInspector</i>"] --> application
-    store["adapter-sqlite-store<br/><i>SavedSearchStore</i>"] --> application
+    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore,<br/>FavoritesStore</i>"] --> application
+    s3["adapter-s3<br/><i>Lister, Copier, Mover, Remover, FolderMaker,<br/>Reader, Writer, Materializer, MetadataEditor,<br/>Presigner, VersionLister, S3Connector</i>"] --> application
+    keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
 
@@ -21,10 +23,12 @@ flowchart RL
     app --> tokio_rt
     app --> preview
     app --> store
+    app --> s3
+    app --> keyring
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M3)
+## Ports and their implementations (M1–M4)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -39,7 +43,15 @@ flowchart RL
 | `ArchiveInspector` | `adapter_preview::LocalArchiveInspector`, `testing::StubArchiveInspector` | `adapter-preview/src/archive.rs` tests (tar, tar.gz, zip, unsupported) |
 | `SavedSearchStore` | `adapter_sqlite_store::SqliteStore`, `testing::InMemorySavedSearches` | `adapter-sqlite-store/tests/saved_searches.rs` (persistence across reopen, ordering, corrupt rows) |
 | `Clock` | `adapter_tokio_runtime::TokioClock`, `testing::InstantClock` | `adapter-tokio-runtime` unit test |
-| `ProviderFactory` / `MountResolver` | `LocalFsFactory`, `ProviderRegistry` | `application::registry` tests |
+| `ProviderFactory` / `MountResolver` | `LocalFsFactory`, `adapter_s3::S3Service`, `ProviderRegistry` | `application::registry` tests |
+| `Lister`, `Copier`, `Mover`, `Remover`, `FolderMaker` on S3 | `adapter_s3::BucketFs` | `adapter-s3/tests/s3_contract.rs` (lister, mutation and stream suites, 29 cases) against SeaweedFS in CI |
+| `Reader`, `Writer` | `LocalFs` (hidden partial file + no-replace rename), `BucketFs` (PUT / multipart, `If-None-Match: *`), `FakeVfs` | `stream_contract_tests!` (7 cases) for all three; cross-provider use cases in `application/tests/across_providers.rs` |
+| `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |
+| `S3Connector` | `S3Service`, `testing::FakeS3Connector` | `across_providers.rs` (add/rollback, buckets by name, permission denied) |
+| `AccountStore`, `FavoritesStore` | `SqliteStore`, `testing::{InMemoryAccounts, InMemoryFavorites}` | `adapter-sqlite-store/tests/accounts_and_favorites.rs` |
+| `CredentialStore` | `adapter_keyring::KeyringStore` (Keychain / Secret Service), `testing::InMemoryKeychain` | `adapter-keyring/tests/os_keychain.rs` (`--ignored`, touches the real keychain) |
+| `VolumeLister`, `LocalFileOpener` | `adapter_local_fs::{LocalVolumes, LocalOpener}`, `testing::{FixedVolumes, RecordingOpener}` | `OpenEntry` tests in `across_providers.rs`; volumes checked manually |
+| `CostConfirmer` | `presentation::job_reporting::QtCostConfirmer`, `testing::ScriptedCosts`, `operations::AcceptCosts` (undo/redo) | `across_providers.rs` cost cases; `domain::cost` unit tests |
 
 ## Runtime flow: opening a folder
 
@@ -54,6 +66,13 @@ flowchart RL
 2. The controller reads file URLs from the system clipboard and starts a job with a `JobContext`: a throttled `QtJobObserver`, a `QtConflictResolver` and a cancel token.
 3. `CopyEntries` scans the sources for totals, resolves name clashes by asking the resolver (with "apply to all"), copies through `Copier`/`FolderMaker`, and records the `Operation` in `OperationHistory`.
 4. The watcher reports the new items to every open folder view. The job's end updates the undo/redo labels.
+
+## Runtime flow: a cross-provider copy (M4)
+
+1. Paste in an S3 folder: the controller takes `s3://` locations from the in-app clipboard (or `file://` URLs from the system one).
+2. `CopyEntries` scans the sources, builds a `TransferEstimate` and asks `CostPolicy`; if it warns, `QtCostConfirmer` shows `CostDialog.qml` unless the account opted out.
+3. Each item is routed: server-side `CopyObject` inside one bucket, otherwise `Reader` → `Writer` streaming (8 MiB multipart parts, 4 in flight).
+4. S3 has no watcher, so when the job ends the controller emits `folders_changed` and open views of the affected folders reload.
 
 ## Dependency injection without globals
 `app` builds `AppServices` (use cases + runtime handle). `bootstrap.cpp` wraps them in a `ServicesHolder` QObject

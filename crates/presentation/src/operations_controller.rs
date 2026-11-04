@@ -15,13 +15,16 @@ use application::operations::{JobContext, OperationError};
 use application::use_cases::TransferRequest;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QList, QString, QStringList};
-use domain::{Conflict, ConflictChoice, ConflictResolution, ConflictScope, EntryKind, PathSegment, StoragePath};
+use domain::{
+    AccountId, Conflict, ConflictChoice, ConflictResolution, ConflictScope, CostDecision, CostReason, CostWarning,
+    EntryKind, Operation, PathSegment, S3Location, StoragePath,
+};
 use futures::channel::oneshot;
 
 use crate::clipboard_bridge::{clipboard_urls, set_clipboard_urls};
 use crate::error_messages::{open_message, operation_message};
 use crate::file_urls::{from_file_url, to_file_url};
-use crate::job_reporting::{QtConflictResolver, QtJobObserver};
+use crate::job_reporting::{QtConflictResolver, QtCostConfirmer, QtJobObserver};
 use crate::job_text::{
     TransferVerb, delete_title, redo_menu_text, redo_title, transfer_title, trash_title, undo_menu_text, undo_title,
 };
@@ -78,6 +81,18 @@ pub mod qobject {
     }
 
     #[qenum(OperationsController)]
+    enum CostAnswer {
+        Continue,
+        CancelTransfer,
+    }
+
+    #[qenum(OperationsController)]
+    enum CostReach {
+        AskAgain,
+        StopAsking,
+    }
+
+    #[qenum(OperationsController)]
     enum AnswerReach {
         ThisItem,
         AllRemaining,
@@ -97,6 +112,9 @@ pub mod qobject {
         #[qproperty(QString, conflict_title)]
         #[qproperty(QString, conflict_detail)]
         #[qproperty(QString, error_message)]
+        #[qproperty(bool, cost_pending)]
+        #[qproperty(QString, cost_title)]
+        #[qproperty(QString, cost_detail)]
         type OperationsController = super::OperationsControllerRust;
     }
 
@@ -127,6 +145,8 @@ pub mod qobject {
         #[qinvokable]
         fn answer_conflict(self: Pin<&mut OperationsController>, answer: ConflictAnswer, reach: AnswerReach);
         #[qinvokable]
+        fn answer_cost(self: Pin<&mut OperationsController>, answer: CostAnswer, reach: CostReach);
+        #[qinvokable]
         fn dismiss_error(self: Pin<&mut OperationsController>);
         /// Re-reads the undo/redo labels after work done outside this controller.
         #[qinvokable]
@@ -138,26 +158,46 @@ pub mod qobject {
         /// An item now lives at `location` after `rename`.
         #[qsignal]
         fn renamed(self: Pin<&mut OperationsController>, location: QString);
+        /// Work finished that changed these folders; views of folders that
+        /// can't be watched (S3) reload.
+        #[qsignal]
+        fn folders_changed(self: Pin<&mut OperationsController>, locations: QStringList);
     }
 
     impl cxx_qt::Threading for OperationsController {}
     impl cxx_qt::Initialize for OperationsController {}
 }
 
-use qobject::{AnswerReach, ConflictAnswer, JobListModel, PasteMode, ServicesHolder};
+use qobject::{AnswerReach, ConflictAnswer, CostAnswer, CostReach, JobListModel, PasteMode, ServicesHolder};
 
 const NOT_READY_MESSAGE: &str = "The application is still starting.";
 const INVALID_NAME_MESSAGE: &str = "Names can't be empty or contain \u{201c}/\u{201d}.";
-const NOTHING_LOCAL_MESSAGE: &str = "Only items on this computer can be copied to the clipboard for now.";
 const PREPARING_DETAIL: &str = "Preparing…";
 
 /// A conflict waiting for the user, oldest first.
+/// A cost confirmation waiting for the user.
+struct PendingCost {
+    job_id: i32,
+    warning: CostWarning,
+    accounts: Vec<AccountId>,
+    reply: oneshot::Sender<CostDecision>,
+}
+
+/// What the controller tracks per running job.
+struct RunningJob {
+    cancellation: CancellationSource,
+    /// Folders the job changes, announced when it ends.
+    affected: Vec<StoragePath>,
+}
+
 struct PendingConflict {
     job_id: i32,
     conflict: Conflict,
     reply: oneshot::Sender<ConflictResolution>,
 }
 
+// The bools are Q_PROPERTY storage, which cxx-qt requires as plain fields.
+#[allow(clippy::struct_excessive_bools, reason = "mirrors Qt properties one-to-one")]
 pub struct OperationsControllerRust {
     services: *mut ServicesHolder,
     jobs: *mut JobListModel,
@@ -171,7 +211,16 @@ pub struct OperationsControllerRust {
     error_message: QString,
 
     owned_jobs: cxx::UniquePtr<JobListModel>,
-    running: HashMap<i32, CancellationSource>,
+    cost_pending: bool,
+    cost_title: QString,
+    cost_detail: QString,
+    running: HashMap<i32, RunningJob>,
+    costs: VecDeque<PendingCost>,
+    /// Everything last copied, including items without a file URL (S3)…
+    clipboard: Vec<StoragePath>,
+    /// …and the file URLs put on the system clipboard at that moment, to tell
+    /// whether another app has copied something since.
+    clipboard_urls_sent: Vec<String>,
     next_job_id: i32,
     conflicts: VecDeque<PendingConflict>,
 }
@@ -190,7 +239,13 @@ impl Default for OperationsControllerRust {
             conflict_detail: QString::default(),
             error_message: QString::default(),
             owned_jobs: cxx::UniquePtr::null(),
+            cost_pending: false,
+            cost_title: QString::default(),
+            cost_detail: QString::default(),
             running: HashMap::new(),
+            costs: VecDeque::new(),
+            clipboard: Vec::new(),
+            clipboard_urls_sent: Vec::new(),
             next_job_id: 1,
             conflicts: VecDeque::new(),
         }
@@ -207,40 +262,60 @@ impl cxx_qt::Initialize for qobject::OperationsController {
 }
 
 impl qobject::OperationsController {
-    pub fn copy_to_clipboard(self: Pin<&mut Self>, locations: &QStringList) {
+    pub fn copy_to_clipboard(mut self: Pin<&mut Self>, locations: &QStringList) {
         let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
-        let urls: Vec<String> =
-            decode_all(locations).iter().filter_map(|path| to_file_url(path, services.home.mount())).collect();
-        if urls.is_empty() {
-            return self.report(NOTHING_LOCAL_MESSAGE);
-        }
+        let items = decode_all(locations);
+        let urls: Vec<String> = items.iter().filter_map(|path| to_file_url(path, services.home.mount())).collect();
         set_clipboard_urls(&urls);
+        let mut rust = self.as_mut().rust_mut();
+        rust.clipboard = items;
+        rust.clipboard_urls_sent = urls;
     }
 
     pub fn can_paste(&self) -> bool {
-        !clipboard_urls().is_empty()
+        !self.clipboard.is_empty() || !clipboard_urls().is_empty()
+    }
+
+    /// Our own clipboard while the system clipboard still holds what we put
+    /// there; otherwise whatever another app copied.
+    fn clipboard_items(&self, local: &domain::MountId) -> Vec<StoragePath> {
+        let system = clipboard_urls();
+        if system == self.clipboard_urls_sent || system.is_empty() {
+            self.clipboard.clone()
+        } else {
+            system.iter().filter_map(|url| from_file_url(url, local)).collect()
+        }
     }
 
     pub fn paste(self: Pin<&mut Self>, destination: &QString, mode: PasteMode) {
         let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
         let Ok(destination) = StoragePath::decode(&destination.to_string()) else { return };
-        let local = services.home.mount();
-        let sources: Vec<StoragePath> = clipboard_urls().iter().filter_map(|url| from_file_url(url, local)).collect();
+        let sources = self.clipboard_items(services.home.mount());
         if sources.is_empty() {
             return;
         }
         let ops = services.operations;
+        let mut affected = parents(&sources);
+        affected.push(destination.clone());
         let request = TransferRequest { sources, destination };
         match mode {
             PasteMode::Move => {
                 let title = transfer_title(TransferVerb::Moving, &request.sources, &request.destination);
                 let use_case = ops.move_entries;
-                self.spawn_job(title, move |ctx| async move { use_case.execute(&request, &ctx).await.result });
+                self.spawn_job(
+                    title,
+                    affected,
+                    move |ctx| async move { use_case.execute(&request, &ctx).await.result },
+                );
             }
             PasteMode::Copy | PasteMode { .. } => {
                 let title = transfer_title(TransferVerb::Copying, &request.sources, &request.destination);
                 let use_case = ops.copy;
-                self.spawn_job(title, move |ctx| async move { use_case.execute(&request, &ctx).await.result });
+                self.spawn_job(
+                    title,
+                    affected,
+                    move |ctx| async move { use_case.execute(&request, &ctx).await.result },
+                );
             }
         }
     }
@@ -252,7 +327,8 @@ impl qobject::OperationsController {
             return;
         }
         let use_case = services.operations.trash;
-        self.spawn_job(trash_title(&items), move |ctx| async move { use_case.execute(&items, &ctx).await.result });
+        let (title, affected) = (trash_title(&items), parents(&items));
+        self.spawn_job(title, affected, move |ctx| async move { use_case.execute(&items, &ctx).await.result });
     }
 
     pub fn delete_permanently(self: Pin<&mut Self>, locations: &QStringList) {
@@ -262,7 +338,8 @@ impl qobject::OperationsController {
             return;
         }
         let use_case = services.operations.delete;
-        self.spawn_job(delete_title(&items), move |ctx| async move { use_case.execute(&items, &ctx).await });
+        let (title, affected) = (delete_title(&items), parents(&items));
+        self.spawn_job(title, affected, move |ctx| async move { use_case.execute(&items, &ctx).await });
     }
 
     pub fn rename(self: Pin<&mut Self>, location: &QString, new_name: &QString) {
@@ -274,6 +351,7 @@ impl qobject::OperationsController {
         let use_case = services.operations.rename;
         self.spawn_task(async move { use_case.execute(&item, name).await }, |mut controller, result| match result {
             Ok(renamed) => {
+                controller.as_mut().announce_changes(&parents(std::slice::from_ref(&renamed)));
                 controller.as_mut().renamed(QString::from(&renamed.encode()));
                 controller.refresh_history();
             }
@@ -291,6 +369,7 @@ impl qobject::OperationsController {
         let use_case = services.operations.create_folder;
         self.spawn_task(async move { use_case.execute(&parent, &base).await }, |mut controller, result| match result {
             Ok(created) => {
+                controller.as_mut().announce_changes(&parents(std::slice::from_ref(&created)));
                 controller.as_mut().folder_created(QString::from(&created.encode()));
                 controller.refresh_history();
             }
@@ -313,7 +392,7 @@ impl qobject::OperationsController {
         let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
         let Some(entry) = services.operations.history.next_undo() else { return };
         let use_case = services.operations.undo;
-        self.spawn_job(undo_title(entry.kind), move |ctx| async move {
+        self.spawn_job(undo_title(entry.kind), affected_folders(&entry.operation), move |ctx| async move {
             use_case.execute(&ctx).await.and_then(|report| report.result)
         });
     }
@@ -322,17 +401,82 @@ impl qobject::OperationsController {
         let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
         let Some(entry) = services.operations.history.next_redo() else { return };
         let use_case = services.operations.redo;
-        self.spawn_job(redo_title(entry.kind), move |ctx| async move {
+        self.spawn_job(redo_title(entry.kind), affected_folders(&entry.operation), move |ctx| async move {
             use_case.execute(&ctx).await.and_then(|report| report.result)
         });
     }
 
     pub fn cancel_job(mut self: Pin<&mut Self>, job_id: i32) {
-        if let Some(source) = self.running.get(&job_id) {
-            source.cancel();
+        if let Some(job) = self.running.get(&job_id) {
+            job.cancellation.cancel();
         }
-        // A job waiting for a conflict answer would otherwise never notice.
+        // A job waiting for an answer would otherwise never notice.
         self.as_mut().drop_conflicts_of(job_id, Some(STOP_ALL));
+        self.drop_costs_of(job_id, Some(CostDecision::Cancel));
+    }
+
+    pub fn answer_cost(mut self: Pin<&mut Self>, answer: CostAnswer, reach: CostReach) {
+        let Some(pending) = self.as_mut().rust_mut().costs.pop_front() else { return };
+        let decision = match (answer, reach) {
+            (CostAnswer::Continue, CostReach::StopAsking) => CostDecision::ProceedAndStopAsking,
+            (CostAnswer::Continue, CostReach::AskAgain | CostReach { .. }) => CostDecision::Proceed,
+            (CostAnswer::CancelTransfer | CostAnswer { .. }, _) => CostDecision::Cancel,
+        };
+        if decision == CostDecision::ProceedAndStopAsking {
+            self.as_mut().stop_cost_warnings(&pending.accounts);
+        }
+        let _ = pending.reply.send(decision);
+        self.show_next_cost();
+    }
+
+    pub(crate) fn enqueue_cost(
+        mut self: Pin<&mut Self>,
+        job_id: i32,
+        warning: CostWarning,
+        accounts: Vec<AccountId>,
+        reply: oneshot::Sender<CostDecision>,
+    ) {
+        if !self.running.contains_key(&job_id) {
+            return;
+        }
+        self.as_mut().rust_mut().costs.push_back(PendingCost { job_id, warning, accounts, reply });
+        self.show_next_cost();
+    }
+
+    fn show_next_cost(mut self: Pin<&mut Self>) {
+        let texts = self.costs.front().map(|pending| cost_texts(&pending.warning));
+        let (title, detail) = texts.clone().unwrap_or_default();
+        self.as_mut().set_cost_title(QString::from(&title));
+        self.as_mut().set_cost_detail(QString::from(&detail));
+        self.set_cost_pending(texts.is_some());
+    }
+
+    fn drop_costs_of(mut self: Pin<&mut Self>, job_id: i32, answer: Option<CostDecision>) {
+        let pending = std::mem::take(&mut self.as_mut().rust_mut().costs);
+        let (theirs, others): (VecDeque<_>, VecDeque<_>) = pending.into_iter().partition(|p| p.job_id == job_id);
+        for cost in theirs {
+            if let Some(answer) = answer {
+                let _ = cost.reply.send(answer);
+            }
+        }
+        self.as_mut().rust_mut().costs = others;
+        self.show_next_cost();
+    }
+
+    fn stop_cost_warnings(self: Pin<&mut Self>, accounts: &[AccountId]) {
+        let Some(services) = self.app_services() else { return };
+        let (use_case, accounts) = (services.accounts.cost_warnings, accounts.to_vec());
+        services.runtime.spawn(async move {
+            for account in accounts {
+                // Losing this preference only means being asked again.
+                let _ = use_case.execute(account, true).await;
+            }
+        });
+    }
+
+    fn announce_changes(self: Pin<&mut Self>, folders: &[StoragePath]) {
+        let encoded: QStringList = folders.iter().map(|f| QString::from(&f.encode())).collect();
+        self.folders_changed(encoded);
     }
 
     pub fn answer_conflict(mut self: Pin<&mut Self>, answer: ConflictAnswer, reach: AnswerReach) {
@@ -371,11 +515,15 @@ impl qobject::OperationsController {
     }
 
     pub(crate) fn finish_job(mut self: Pin<&mut Self>, job_id: i32, result: Result<(), OperationError>) {
-        self.as_mut().rust_mut().running.remove(&job_id);
+        let finished = self.as_mut().rust_mut().running.remove(&job_id);
         if let Some(model) = self.as_mut().rust_mut().owned_jobs.as_mut() {
             model.remove_job(job_id);
         }
         self.as_mut().drop_conflicts_of(job_id, None);
+        self.as_mut().drop_costs_of(job_id, None);
+        if let Some(job) = finished {
+            self.as_mut().announce_changes(&job.affected);
+        }
         if let Err(error) = result {
             self.as_mut().report_operation_error(&error);
         }
@@ -429,23 +577,29 @@ impl qobject::OperationsController {
         self.show_next_conflict();
     }
 
-    fn spawn_job<Fut>(mut self: Pin<&mut Self>, title: String, work: impl FnOnce(JobContext) -> Fut)
-    where
+    fn spawn_job<Fut>(
+        mut self: Pin<&mut Self>,
+        title: String,
+        affected: Vec<StoragePath>,
+        work: impl FnOnce(JobContext) -> Fut,
+    ) where
         Fut: Future<Output = Result<(), OperationError>> + Send + 'static,
     {
         let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
         let job_id = self.next_job_id;
         let source = CancellationSource::new();
         let thread = self.qt_thread();
+        let accounts = accounts_of(&affected);
         let ctx = JobContext {
             observer: Arc::new(QtJobObserver::new(job_id, thread.clone())),
             resolver: Arc::new(QtConflictResolver::new(job_id, thread.clone())),
+            costs: Arc::new(QtCostConfirmer::new(job_id, thread.clone(), accounts, services.accounts.list.clone())),
             cancel: source.token(),
         };
         let job = work(ctx);
         let mut rust = self.as_mut().rust_mut();
         rust.next_job_id = job_id.wrapping_add(1);
-        rust.running.insert(job_id, source);
+        rust.running.insert(job_id, RunningJob { cancellation: source, affected });
         if let Some(model) = rust.owned_jobs.as_mut() {
             model.add_job(job_row(job_id, title, PREPARING_DETAIL.to_owned(), None));
         }
@@ -481,6 +635,47 @@ fn job_row(id: i32, title: String, detail: String, fraction: Option<f64>) -> Job
     JobRow { id, title, detail, fraction: fraction.unwrap_or_default(), determinate: fraction.is_some() }
 }
 
+/// The folders containing `items` (deduplicated, in order).
+fn parents(items: &[StoragePath]) -> Vec<StoragePath> {
+    let mut folders: Vec<StoragePath> = Vec::new();
+    for parent in items.iter().filter_map(StoragePath::parent) {
+        if !folders.contains(&parent) {
+            folders.push(parent);
+        }
+    }
+    folders
+}
+
+/// Folders an undo or redo of `operation` will change.
+fn affected_folders(operation: &Operation) -> Vec<StoragePath> {
+    let mut items = Vec::new();
+    collect_items(operation, &mut items);
+    parents(&items)
+}
+
+fn collect_items(operation: &Operation, items: &mut Vec<StoragePath>) {
+    match operation {
+        Operation::Copied(moves) | Operation::Moved(moves) => {
+            items.extend(moves.iter().flat_map(|m| [m.from.clone(), m.to.clone()]));
+        }
+        Operation::Trashed(tickets) | Operation::Restored(tickets) => {
+            items.extend(tickets.iter().map(|t| t.original.clone()));
+        }
+        Operation::CreatedFolder(path) => items.push(path.clone()),
+        Operation::Deleted(paths) => items.extend(paths.iter().cloned()),
+        Operation::Sequence(parts) => parts.iter().for_each(|part| collect_items(part, items)),
+    }
+}
+
+/// The S3 accounts whose buckets these folders are in.
+fn accounts_of(folders: &[StoragePath]) -> Vec<AccountId> {
+    let mut accounts: Vec<AccountId> =
+        folders.iter().filter_map(|f| S3Location::of(f.mount())).map(|l| l.account).collect();
+    accounts.sort();
+    accounts.dedup();
+    accounts
+}
+
 fn decode_all(locations: &QStringList) -> Vec<StoragePath> {
     QList::<QString>::from(locations).iter().filter_map(|text| StoragePath::decode(&text.to_string()).ok()).collect()
 }
@@ -514,10 +709,30 @@ fn conflict_texts(conflict: &Conflict) -> (String, String) {
         (_, Some(size)) => format_size(size),
         (_, None) => "a file".to_owned(),
     };
+    let consequence = if conflict.replace_is_permanent {
+        "This location has no Trash: replacing deletes the existing item permanently."
+    } else {
+        "Replacing moves the existing item to the Trash."
+    };
+    let detail =
+        format!("Existing: {}. New: {}. {consequence}", describe(&conflict.existing), describe(&conflict.incoming));
+    (title, detail)
+}
+
+fn cost_texts(warning: &CostWarning) -> (String, String) {
+    let reasons: Vec<String> = warning
+        .reasons
+        .iter()
+        .map(|reason| match reason {
+            CostReason::LargeTransfer(size) => format!("transfers {}", format_size(*size)),
+            CostReason::CrossRegion { from, to } => format!("crosses regions ({from} → {to})"),
+        })
+        .collect();
+    let title = format!("This transfer {} and may be billed by your provider.", reasons.join(" and "));
+    let items = if warning.items == 1 { "1 item".to_owned() } else { format!("{} items", warning.items) };
     let detail = format!(
-        "Existing: {}. New: {}. Replacing moves the existing item to the Trash.",
-        describe(&conflict.existing),
-        describe(&conflict.incoming)
+        "{items}, {} in total. Storage providers charge for data transfer and requests.",
+        format_size(warning.bytes)
     );
     (title, detail)
 }

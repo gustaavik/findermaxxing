@@ -12,6 +12,12 @@ ignore = [
     # decode its own bundled, build-time grammar/theme dumps, never untrusted
     # input. Revisit when syntect moves off it.
     { id = "RUSTSEC-2025-0141", reason = "syntect-internal decoding of bundled data only" },
+    # zvariant / zvariant_derive / zbus_names were folded into zbus and are no
+    # longer published standalone (no vulnerability). Linux-only, inside
+    # keyring's Secret Service backend; clears when keyring moves to newer zbus.
+    { id = "RUSTSEC-2026-0370", reason = "folded into zbus; Linux keyring backend only" },
+    { id = "RUSTSEC-2026-0371", reason = "folded into zbus; Linux keyring backend only" },
+    { id = "RUSTSEC-2026-0372", reason = "folded into zbus; Linux keyring backend only" },
 ]
 
 [licenses]

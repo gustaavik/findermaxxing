@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use domain::{OperationKind, StoragePath};
+use domain::{CostPolicy, OperationKind, StoragePath};
 
 use crate::operations::transfer::{self, TransferMode};
 use crate::operations::{JobContext, OperationHistory, OperationReport};
@@ -17,17 +17,24 @@ pub struct TransferRequest {
 pub struct CopyEntries {
     mounts: Arc<dyn MountResolver>,
     history: Arc<OperationHistory>,
+    costs: CostPolicy,
 }
 
 impl CopyEntries {
     #[must_use]
     pub fn new(mounts: Arc<dyn MountResolver>, history: Arc<OperationHistory>) -> Self {
-        Self { mounts, history }
+        Self { mounts, history, costs: CostPolicy::default() }
+    }
+
+    #[must_use]
+    pub fn with_cost_policy(self, costs: CostPolicy) -> Self {
+        Self { costs, ..self }
     }
 
     pub async fn execute(&self, request: &TransferRequest, ctx: &JobContext) -> OperationReport {
         let report =
-            transfer::run(&*self.mounts, TransferMode::Copy, &request.sources, &request.destination, ctx).await;
+            transfer::run(&*self.mounts, TransferMode::Copy, &request.sources, &request.destination, self.costs, ctx)
+                .await;
         self.history.record(OperationKind::Copy, report.done.clone());
         report
     }
@@ -37,17 +44,24 @@ impl CopyEntries {
 pub struct MoveEntries {
     mounts: Arc<dyn MountResolver>,
     history: Arc<OperationHistory>,
+    costs: CostPolicy,
 }
 
 impl MoveEntries {
     #[must_use]
     pub fn new(mounts: Arc<dyn MountResolver>, history: Arc<OperationHistory>) -> Self {
-        Self { mounts, history }
+        Self { mounts, history, costs: CostPolicy::default() }
+    }
+
+    #[must_use]
+    pub fn with_cost_policy(self, costs: CostPolicy) -> Self {
+        Self { costs, ..self }
     }
 
     pub async fn execute(&self, request: &TransferRequest, ctx: &JobContext) -> OperationReport {
         let report =
-            transfer::run(&*self.mounts, TransferMode::Move, &request.sources, &request.destination, ctx).await;
+            transfer::run(&*self.mounts, TransferMode::Move, &request.sources, &request.destination, self.costs, ctx)
+                .await;
         self.history.record(OperationKind::Move, report.done.clone());
         report
     }

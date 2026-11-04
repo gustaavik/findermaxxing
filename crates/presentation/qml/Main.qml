@@ -36,6 +36,17 @@ ApplicationWindow {
     OperationsController {
         id: fileOps
         services: window.services
+        // Folders that can't be watched (S3) reload when a job changes them.
+        onFoldersChanged: locations => {
+            for (let i = 0; i < views.count; ++i) {
+                views.itemAt(i).controller.reloadIfShowing(locations)
+            }
+        }
+    }
+
+    SidebarController {
+        id: sidebarController
+        services: window.services
     }
 
     // `opened` only exists because a ListModel needs at least one role.
@@ -92,8 +103,19 @@ ApplicationWindow {
         }
     }
 
-    ColumnLayout {
+    SplitView {
         anchors.fill: parent
+        orientation: Qt.Horizontal
+
+    Sidebar {
+        SplitView.preferredWidth: 210
+        SplitView.minimumWidth: 140
+        controller: sidebarController
+        onOpenRequested: location => window.currentView.controller.openLocationId(location)
+    }
+
+    ColumnLayout {
+        SplitView.fillWidth: true
         spacing: 0
 
         StackLayout {
@@ -107,6 +129,7 @@ ApplicationWindow {
                 delegate: FolderView {
                     services: window.services
                     operations: fileOps
+                    sidebar: sidebarController
                 }
             }
         }
@@ -142,6 +165,11 @@ ApplicationWindow {
             Layout.fillWidth: true
             operations: fileOps
         }
+    }
+    }
+
+    CostDialog {
+        operations: fileOps
     }
 
     ConflictDialog {

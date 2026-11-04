@@ -272,39 +272,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use application::ProviderRegistry;
-    use application::ports::MountResolver;
 
-    use crate::services::{FileOperations, SavedSearches};
-    use application::ports::SavedSearchStore;
-    use application::testing::{FakeVfs, InMemorySavedSearches, InstantClock, StubArchiveInspector, StubTextRenderer};
-    use application::use_cases::{CoalesceWindow, ListDirectory, PreparePreview, SearchFiles, WatchDirectory};
+    use application::testing::FakeVfs;
 
     const EVENT_DEADLINE: Duration = Duration::from_secs(5);
 
     fn services(fake: &FakeVfs) -> AppServices {
-        let registry: Arc<dyn MountResolver> =
-            Arc::new(ProviderRegistry::default().with_provider(fake.clone().into_factory()).unwrap());
-        AppServices {
-            list_directory: Arc::new(ListDirectory::new(registry.clone())),
-            watch_directory: Arc::new(WatchDirectory::new(
-                registry.clone(),
-                Arc::new(InstantClock),
-                CoalesceWindow::default(),
-            )),
-            search: Arc::new(SearchFiles::new(registry.clone())),
-            preview: Arc::new(PreparePreview::new(
-                registry.clone(),
-                Arc::new(StubTextRenderer),
-                Arc::new(StubArchiveInspector),
-            )),
-            saved_searches: SavedSearches::new(
-                &(Arc::new(InMemorySavedSearches::default()) as Arc<dyn SavedSearchStore>),
-            ),
-            operations: FileOperations::new(&registry),
-            runtime: tokio::runtime::Handle::current(),
-            home: fake.path("/"),
-        }
+        crate::services::fake_services(fake)
     }
 
     fn recording_sink() -> (EventSink, Arc<Mutex<Vec<SessionEvent>>>) {

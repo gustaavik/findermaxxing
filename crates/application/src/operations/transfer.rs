@@ -1,12 +1,19 @@
-//! Copy and move of top-level items into one destination folder, with
-//! conflict resolution, progress, cancellation and an exact undo record.
+//! Copy and move of top-level items into one destination folder, on the same
+//! provider or across providers, with conflict resolution, cost confirmation,
+//! progress, cancellation and an exact undo record.
+//!
+//! Strategy per file: a same-provider copy uses the provider's `Copier`
+//! (APFS clone, S3 server-side copy) and falls back to streaming when it
+//! can't; cross-provider copies always stream `Reader` → `Writer`.
 
 use std::sync::Arc;
 
 use domain::{
-    ByteSize, Conflict, ConflictChoice, ConflictMemory, EntryKind, FIRST_DUPLICATE_NUMBER, FileEntry, Operation,
-    Relocation, StoragePath, TrashTicket, VfsError, numbered_name,
+    ByteSize, Capability, Conflict, ConflictChoice, ConflictMemory, CostDecision, CostPolicy, EntryKind,
+    FIRST_DUPLICATE_NUMBER, FileEntry, Operation, Relocation, StoragePath, TransferEstimate, TrashTicket, VfsError,
+    numbered_name,
 };
+use futures::StreamExt;
 
 use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
@@ -27,9 +34,10 @@ pub(crate) async fn run(
     mode: TransferMode,
     sources: &[StoragePath],
     destination: &StoragePath,
+    policy: CostPolicy,
     ctx: &JobContext,
 ) -> OperationReport {
-    let mut transfer = match Transfer::new(mounts, mode, sources, destination, ctx) {
+    let mut transfer = match Transfer::new(mounts, mode, destination, policy, ctx) {
         Ok(transfer) => transfer,
         Err(error) => return OperationReport::new(Operation::sequence(Vec::new()), Err(error)),
     };
@@ -39,7 +47,10 @@ pub(crate) async fn run(
 
 struct Prepared {
     entry: FileEntry,
-    /// Present for copies, which need every descendant up front for progress totals.
+    source: MountHandle,
+    same_mount: bool,
+    /// Present whenever bytes will be copied (every copy, and moves across
+    /// providers): progress totals need every descendant up front.
     tree: Option<ScannedTree>,
 }
 
@@ -61,35 +72,38 @@ enum Placement {
 
 struct Transfer<'a> {
     mode: TransferMode,
-    handle: MountHandle,
+    mounts: &'a dyn MountResolver,
+    dest: MountHandle,
     destination: &'a StoragePath,
+    policy: CostPolicy,
     ctx: &'a JobContext,
     tracker: Arc<ProgressTracker>,
     memory: ConflictMemory,
     replaced: Vec<TrashTicket>,
+    deleted: Vec<StoragePath>,
     relocations: Vec<Relocation>,
 }
 
 impl<'a> Transfer<'a> {
     fn new(
-        mounts: &dyn MountResolver,
+        mounts: &'a dyn MountResolver,
         mode: TransferMode,
-        sources: &[StoragePath],
         destination: &'a StoragePath,
+        policy: CostPolicy,
         ctx: &'a JobContext,
     ) -> Result<Self, OperationError> {
-        if sources.iter().any(|source| source.mount() != destination.mount()) {
-            return Err(OperationError::CrossMount);
-        }
-        let handle = mounts.resolve(destination.mount()).map_err(OperationError::on(destination))?;
+        let dest = mounts.resolve(destination.mount()).map_err(OperationError::on(destination))?;
         Ok(Self {
             mode,
-            handle,
+            mounts,
+            dest,
             destination,
+            policy,
             ctx,
             tracker: ProgressTracker::new(Arc::clone(&ctx.observer)),
             memory: ConflictMemory::default(),
             replaced: Vec::new(),
+            deleted: Vec::new(),
             relocations: Vec::new(),
         })
     }
@@ -99,11 +113,13 @@ impl<'a> Transfer<'a> {
             TransferMode::Copy => Operation::Copied(self.relocations),
             TransferMode::Move => Operation::Moved(self.relocations),
         };
-        Operation::sequence(vec![Operation::Trashed(self.replaced), transferred])
+        Operation::sequence(vec![Operation::Trashed(self.replaced), Operation::Deleted(self.deleted), transferred])
     }
 
     async fn execute(&mut self, sources: &[StoragePath]) -> Result<(), OperationError> {
-        for item in self.prepare(sources).await? {
+        let prepared = self.prepare(sources).await?;
+        self.confirm_costs(&prepared).await?;
+        for item in prepared {
             if self.ctx.cancel.is_cancelled() {
                 return Err(OperationError::Cancelled);
             }
@@ -117,25 +133,45 @@ impl<'a> Transfer<'a> {
     }
 
     async fn prepare(&self, sources: &[StoragePath]) -> Result<Vec<Prepared>, OperationError> {
-        let lister = self.handle.lister().map_err(OperationError::on(self.destination))?;
         let mut prepared = Vec::with_capacity(sources.len());
         for source in sources {
-            let entry = lister.stat_boxed(source).await.map_err(OperationError::on(source))?;
+            let on_source = OperationError::on(source);
+            let handle = self.mounts.resolve(source.mount()).map_err(OperationError::on(source))?;
+            let lister = handle.lister().map_err(OperationError::on(source))?;
+            let entry = lister.stat_boxed(source).await.map_err(on_source)?;
             if entry.kind() == EntryKind::Directory && self.destination.is_within(source) {
                 return Err(OperationError::IntoItself { item: source.clone() });
             }
-            let tree = match self.mode {
-                TransferMode::Copy => {
-                    Some(scan(&*lister, entry.clone(), &self.ctx.cancel).await.map_err(OperationError::on(source))?)
-                }
-                TransferMode::Move => None,
+            let same_mount = source.mount() == self.destination.mount();
+            let tree = if self.mode == TransferMode::Copy || !same_mount {
+                Some(scan(&*lister, entry.clone(), &self.ctx.cancel).await.map_err(OperationError::on(source))?)
+            } else {
+                None
             };
-            prepared.push(Prepared { entry, tree });
+            prepared.push(Prepared { entry, source: handle, same_mount, tree });
         }
         let items = prepared.iter().map(Prepared::items).sum();
         let bytes = ByteSize(prepared.iter().map(|p| p.bytes().0).sum());
         self.tracker.begin(items, bytes);
         Ok(prepared)
+    }
+
+    /// Asks before transfers that may be billed (large, or across regions).
+    async fn confirm_costs(&self, prepared: &[Prepared]) -> Result<(), OperationError> {
+        let metered_source = prepared.iter().find(|p| p.source.capabilities().contains(Capability::Metered));
+        let dest_metered = self.dest.capabilities().contains(Capability::Metered);
+        let estimate = TransferEstimate {
+            bytes: ByteSize(prepared.iter().map(|p| p.bytes().0).sum()),
+            items: prepared.iter().map(Prepared::items).sum(),
+            metered: dest_metered || metered_source.is_some(),
+            source_region: metered_source.and_then(|p| p.source.region().map(str::to_owned)),
+            destination_region: if dest_metered { self.dest.region().map(str::to_owned) } else { None },
+        };
+        let Some(warning) = self.policy.assess(&estimate) else { return Ok(()) };
+        match self.ctx.costs.confirm(warning).await {
+            CostDecision::Cancel => Err(OperationError::Stopped),
+            CostDecision::Proceed | CostDecision::ProceedAndStopAsking => Ok(()),
+        }
     }
 
     async fn placement(&mut self, entry: &FileEntry) -> Result<Placement, OperationError> {
@@ -154,7 +190,7 @@ impl<'a> Transfer<'a> {
     }
 
     async fn existing(&self, path: &StoragePath) -> Result<Option<FileEntry>, OperationError> {
-        let lister = self.handle.lister().map_err(OperationError::on(path))?;
+        let lister = self.dest.lister().map_err(OperationError::on(path))?;
         match lister.stat_boxed(path).await {
             Ok(entry) => Ok(Some(entry)),
             Err(VfsError::NotFound) => Ok(None),
@@ -166,7 +202,8 @@ impl<'a> Transfer<'a> {
         let choice = match self.memory.remembered() {
             Some(choice) => choice,
             None => {
-                let conflict = Conflict { incoming: entry.clone(), existing: existing.clone() };
+                let replace_is_permanent = !self.dest.capabilities().contains(Capability::Trash);
+                let conflict = Conflict { incoming: entry.clone(), existing: existing.clone(), replace_is_permanent };
                 let resolution = self.ctx.resolver.resolve(conflict).await;
                 self.memory.record(resolution);
                 resolution.choice
@@ -180,16 +217,22 @@ impl<'a> Transfer<'a> {
         }
     }
 
-    /// The replaced item goes to the trash, not oblivion, so undo can bring it back.
+    /// The replaced item goes to the Trash, so undo can bring it back. Where
+    /// there is no Trash (S3) it is deleted; the conflict prompt said so.
     async fn replace(&mut self, entry: &FileEntry, existing: &FileEntry) -> Result<StoragePath, OperationError> {
-        if entry.path().is_within(existing.path()) {
-            return Err(OperationError::IntoItself { item: existing.path().clone() });
+        let target = existing.path();
+        if entry.path().is_within(target) {
+            return Err(OperationError::IntoItself { item: target.clone() });
         }
-        let on_existing = OperationError::on(existing.path());
-        let trasher = self.handle.trasher().map_err(OperationError::on(existing.path()))?;
-        let ticket = trasher.trash_boxed(existing.path()).await.map_err(on_existing)?;
-        self.replaced.push(ticket);
-        Ok(existing.path().clone())
+        if let Ok(trasher) = self.dest.trasher() {
+            let ticket = trasher.trash_boxed(target).await.map_err(OperationError::on(target))?;
+            self.replaced.push(ticket);
+        } else {
+            let remover = self.dest.remover().map_err(OperationError::on(target))?;
+            remover.remove_boxed(target, self.ctx.cancel.clone()).await.map_err(OperationError::on(target))?;
+            self.deleted.push(target.clone());
+        }
+        Ok(target.clone())
     }
 
     async fn free_name(&self, entry: &FileEntry) -> Result<StoragePath, OperationError> {
@@ -207,19 +250,32 @@ impl<'a> Transfer<'a> {
 
     async fn transfer_one(&mut self, item: Prepared, target: StoragePath) -> Result<(), OperationError> {
         let relocation = Relocation { from: item.entry.path().clone(), to: target.clone() };
+        let route = Route { source: &item.source, dest: &self.dest, same_mount: item.same_mount };
         let cancel = &self.ctx.cancel;
-        let result = match &item.tree {
-            Some(tree) => copy_tree(&self.handle, tree, &target, &self.tracker, cancel).await.map_err(|failure| {
-                // A partial copy is still recorded so that undo cleans it up.
-                if failure.root_created {
-                    self.relocations.push(relocation.clone());
-                }
-                failure.error
-            }),
-            None => move_item(&self.handle, &item.entry, &target, &self.tracker, cancel).await,
+        let result = match (self.mode, &item.tree) {
+            (TransferMode::Copy, Some(tree)) => {
+                copy_tree(&route, tree, &target, &self.tracker, cancel).await.map_err(|failure| {
+                    // A partial copy is still recorded so that undo cleans it up.
+                    if failure.root_created {
+                        self.relocations.push(relocation.clone());
+                    }
+                    failure.error
+                })
+            }
+            (TransferMode::Move, Some(tree)) => {
+                move_across(&route, &item.entry, tree, &target, &self.tracker, cancel).await
+            }
+            (_, None) => move_item(&self.dest, &item.entry, &target, &self.tracker, cancel).await,
         };
         result.map(|()| self.relocations.push(relocation))
     }
+}
+
+/// Where bytes come from and go to.
+pub(crate) struct Route<'a> {
+    pub source: &'a MountHandle,
+    pub dest: &'a MountHandle,
+    pub same_mount: bool,
 }
 
 pub(crate) struct TreeFailure {
@@ -227,9 +283,10 @@ pub(crate) struct TreeFailure {
     pub error: OperationError,
 }
 
-/// Recreates `tree` at `target`: folders via `FolderMaker`, everything else via `Copier`.
+/// Recreates `tree` at `target`: folders via the destination's
+/// `FolderMaker`, files by provider copy or streaming.
 pub(crate) async fn copy_tree(
-    handle: &MountHandle,
+    route: &Route<'_>,
     tree: &ScannedTree,
     target: &StoragePath,
     tracker: &Arc<ProgressTracker>,
@@ -241,24 +298,72 @@ pub(crate) async fn copy_tree(
         let destination = item.path().rebase(tree.root.path(), target).ok_or_else(|| fail(VfsError::NotFound))?;
         tracker.item_started(item.name().into());
         let result = if item.kind() == EntryKind::Directory {
-            match handle.folder_maker() {
+            match route.dest.folder_maker() {
                 Ok(maker) => maker.create_folder_boxed(&destination).await.map(drop),
                 Err(error) => Err(error),
             }
         } else {
-            match handle.copier() {
-                Ok(copier) => copier
-                    .copy_item_boxed(item.path(), &destination, tracker.byte_callback(), cancel.clone())
-                    .await
-                    .map(drop),
-                Err(error) => Err(error),
-            }
+            copy_file(route, item, &destination, tracker, cancel).await
         };
         result.map_err(fail)?;
         root_created = true;
         tracker.item_finished();
     }
     Ok(())
+}
+
+async fn copy_file(
+    route: &Route<'_>,
+    item: &FileEntry,
+    destination: &StoragePath,
+    tracker: &Arc<ProgressTracker>,
+    cancel: &CancelToken,
+) -> Result<(), VfsError> {
+    if route.same_mount
+        && let Ok(copier) = route.dest.copier()
+    {
+        match copier.copy_item_boxed(item.path(), destination, tracker.byte_callback(), cancel.clone()).await {
+            // E.g. S3 server-side copy above 5 GB: fall through to streaming.
+            Err(VfsError::Unsupported(_)) => {}
+            other => return other.map(drop),
+        }
+    }
+    stream_file(route, item, destination, tracker, cancel).await
+}
+
+/// Reader → Writer, chunk by chunk. Aborts the write on any error so the
+/// destination never holds a partial file.
+async fn stream_file(
+    route: &Route<'_>,
+    item: &FileEntry,
+    destination: &StoragePath,
+    tracker: &Arc<ProgressTracker>,
+    cancel: &CancelToken,
+) -> Result<(), VfsError> {
+    let reader = route.source.reader()?;
+    let writer = route.dest.writer()?;
+    let mut chunks = reader.read_boxed(item.path(), cancel.clone()).await?;
+    let mut sink = writer.create_boxed(destination, item.metadata().size).await?;
+    let report = tracker.byte_callback();
+    while let Some(chunk) = chunks.next().await {
+        let written = match chunk {
+            Ok(_) if cancel.is_cancelled() => Err(VfsError::Cancelled),
+            Ok(chunk) => {
+                let length = ByteSize(chunk.len() as u64);
+                sink.write(chunk).await.map(|()| report(length))
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = written {
+            sink.abort().await;
+            return Err(error);
+        }
+    }
+    if cancel.is_cancelled() {
+        sink.abort().await;
+        return Err(VfsError::Cancelled);
+    }
+    sink.commit().await
 }
 
 /// Renames when the provider can; otherwise copies and then deletes the source.
@@ -276,30 +381,38 @@ pub(crate) async fn move_item(
             tracker.item_finished();
             Ok(())
         }
-        Err(VfsError::CrossDevice) => move_by_copying(handle, entry, target, tracker, cancel).await,
+        Err(VfsError::CrossDevice) => {
+            let lister = handle.lister().map_err(OperationError::on(entry.path()))?;
+            let tree = scan(&*lister, entry.clone(), cancel).await.map_err(OperationError::on(entry.path()))?;
+            // The root item was already counted as one item when the move started.
+            tracker.add_totals(tree.item_count().saturating_sub(1), tree.bytes);
+            let route = Route { source: handle, dest: handle, same_mount: true };
+            move_across(&route, entry, &tree, target, tracker, cancel).await
+        }
         Err(error) => Err(OperationError::on(entry.path())(error)),
     }
 }
 
-async fn move_by_copying(
-    handle: &MountHandle,
+/// Copy, then delete the source. A failed copy is cleaned up, so the source
+/// is never deleted unless the copy is complete.
+pub(crate) async fn move_across(
+    route: &Route<'_>,
     entry: &FileEntry,
+    tree: &ScannedTree,
     target: &StoragePath,
     tracker: &Arc<ProgressTracker>,
     cancel: &CancelToken,
 ) -> Result<(), OperationError> {
     let on_source = OperationError::on(entry.path());
-    let lister = handle.lister().map_err(OperationError::on(entry.path()))?;
-    let remover = handle.remover().map_err(OperationError::on(entry.path()))?;
-    let tree = scan(&*lister, entry.clone(), cancel).await.map_err(OperationError::on(entry.path()))?;
-    // The root item was already counted as one item when the move started.
-    tracker.add_totals(tree.item_count().saturating_sub(1), tree.bytes);
-    if let Err(failure) = copy_tree(handle, &tree, target, tracker, cancel).await {
-        if failure.root_created {
+    let source_remover = route.source.remover().map_err(OperationError::on(entry.path()))?;
+    if let Err(failure) = copy_tree(route, tree, target, tracker, cancel).await {
+        if failure.root_created
+            && let Ok(remover) = route.dest.remover()
+        {
             // Our own partial copy; the source is untouched, so nothing is lost.
             let _ = remover.remove_boxed(target, CancelToken::never()).await;
         }
         return Err(failure.error);
     }
-    remover.remove_boxed(entry.path(), cancel.clone()).await.map_err(on_source)
+    source_remover.remove_boxed(entry.path(), cancel.clone()).await.map_err(on_source)
 }

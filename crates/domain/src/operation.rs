@@ -35,6 +35,9 @@ pub enum Operation {
     Trashed(Vec<TrashTicket>),
     Restored(Vec<TrashTicket>),
     CreatedFolder(StoragePath),
+    /// Permanently deleted while undoing on a location without a Trash.
+    /// Irreversible: nothing to redo.
+    Deleted(Vec<StoragePath>),
     /// Parts in the order they happened (e.g. trashing a replaced item, then copying).
     Sequence(Vec<Operation>),
 }
@@ -70,6 +73,7 @@ impl Operation {
             Self::Trashed(tickets) => Action::Restore(tickets.clone()),
             Self::Restored(tickets) => Action::Trash(tickets.iter().map(|t| t.original.clone()).collect()),
             Self::CreatedFolder(path) => Action::Trash(vec![path.clone()]),
+            Self::Deleted(_) => Action::Sequence(Vec::new()),
             Self::Sequence(parts) => Action::Sequence(parts.iter().rev().map(Self::inverse).collect()),
         }
     }
@@ -80,8 +84,19 @@ impl Operation {
         match self {
             Self::Copied(items) | Self::Moved(items) => items.is_empty(),
             Self::Trashed(tickets) | Self::Restored(tickets) => tickets.is_empty(),
+            Self::Deleted(paths) => paths.is_empty(),
             Self::CreatedFolder(_) => false,
             Self::Sequence(parts) => parts.iter().all(Self::is_empty),
+        }
+    }
+
+    /// False when undoing this operation again is impossible (it deleted data for good).
+    #[must_use]
+    pub fn is_reversible(&self) -> bool {
+        match self {
+            Self::Deleted(_) => false,
+            Self::Sequence(parts) => parts.iter().all(Self::is_reversible),
+            _ => true,
         }
     }
 
