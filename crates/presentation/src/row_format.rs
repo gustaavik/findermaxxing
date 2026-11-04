@@ -19,7 +19,7 @@ pub(crate) fn to_row(entry: &FileEntry) -> EntryRow {
     let modified = entry.metadata().modified;
     EntryRow {
         name: entry.name().to_string(),
-        location: entry.path().to_string(),
+        location: entry.path().encode(),
         icon_name: icon_name(entry.kind()).to_owned(),
         size_text: entry.metadata().size.map(format_size).unwrap_or_default(),
         modified_ms: modified.map_or(0, domain::Timestamp::unix_millis),

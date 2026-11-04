@@ -3,8 +3,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import FinderMaxxing
 
-// Window chrome and tabs only. Each tab is a FolderView with its own controller;
-// the tab list itself is pure view state.
+// Window chrome, tabs, and the window-wide file-operation UI (jobs, conflicts,
+// errors, undo/redo). Each tab is a FolderView with its own controller; the
+// tab list itself is pure view state.
 ApplicationWindow {
     id: window
 
@@ -30,6 +31,11 @@ ApplicationWindow {
             return
         }
         tabs.remove(index)
+    }
+
+    OperationsController {
+        id: fileOps
+        services: window.services
     }
 
     // `opened` only exists because a ListModel needs at least one role.
@@ -61,6 +67,22 @@ ApplicationWindow {
             }
 
             ToolButton {
+                text: "↶"
+                enabled: fileOps.canUndo
+                onClicked: fileOps.undo()
+                ToolTip.visible: hovered
+                ToolTip.text: fileOps.undoText
+                Accessible.name: fileOps.canUndo ? fileOps.undoText : qsTr("Undo")
+            }
+            ToolButton {
+                text: "↷"
+                enabled: fileOps.canRedo
+                onClicked: fileOps.redo()
+                ToolTip.visible: hovered
+                ToolTip.text: fileOps.redoText
+                Accessible.name: fileOps.canRedo ? fileOps.redoText : qsTr("Redo")
+            }
+            ToolButton {
                 text: "+"
                 onClicked: window.newTab()
                 ToolTip.visible: hovered
@@ -70,17 +92,71 @@ ApplicationWindow {
         }
     }
 
-    StackLayout {
+    ColumnLayout {
         anchors.fill: parent
-        currentIndex: tabBar.currentIndex
+        spacing: 0
 
-        Repeater {
-            id: views
-            model: tabs
-            delegate: FolderView {
-                services: window.services
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: tabBar.currentIndex
+
+            Repeater {
+                id: views
+                model: tabs
+                delegate: FolderView {
+                    services: window.services
+                    operations: fileOps
+                }
             }
         }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: errorRow.implicitHeight + 12
+            visible: fileOps.errorMessage !== ""
+            color: palette.alternateBase
+
+            RowLayout {
+                id: errorRow
+                anchors.fill: parent
+                anchors.margins: 6
+                anchors.leftMargin: 12
+
+                Label {
+                    Layout.fillWidth: true
+                    text: fileOps.errorMessage
+                    wrapMode: Text.Wrap
+                    Accessible.role: Accessible.AlertMessage
+                    Accessible.name: text
+                }
+                ToolButton {
+                    text: "✕"
+                    onClicked: fileOps.dismissError()
+                    Accessible.name: qsTr("Dismiss")
+                }
+            }
+        }
+
+        JobsPanel {
+            Layout.fillWidth: true
+            operations: fileOps
+        }
+    }
+
+    ConflictDialog {
+        operations: fileOps
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Undo]
+        enabled: fileOps.canUndo
+        onActivated: fileOps.undo()
+    }
+    Shortcut {
+        sequences: [StandardKey.Redo]
+        enabled: fileOps.canRedo
+        onActivated: fileOps.redo()
     }
 
     Shortcut {

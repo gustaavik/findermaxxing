@@ -1,0 +1,15 @@
+//! Shared machinery behind the file-operation use cases: job context,
+//! progress, scanning, transfers (copy/move with conflicts), the prompt-free
+//! action executor used by undo/redo, and the history itself.
+
+mod context;
+mod error;
+pub(crate) mod executor;
+mod history;
+mod progress;
+mod scan;
+pub(crate) mod transfer;
+
+pub use context::JobContext;
+pub use error::{OperationError, OperationReport};
+pub use history::{HISTORY_LIMIT, HistoryEntry, OperationHistory};

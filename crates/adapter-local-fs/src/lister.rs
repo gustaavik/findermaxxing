@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::Path;
+use std::future::Future;
+use std::os::unix::ffi::OsStrExt;
 
 use application::CancelToken;
 use application::ports::Lister;
@@ -10,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::entry::build_entry;
 use crate::error::from_io;
-use crate::native_path::{non_utf8, to_native};
+use crate::native_path::{segment_of, to_native};
 
 /// Batches in flight between the blocking reader and the consumer. Small, so a
 /// slow consumer applies back-pressure instead of buffering a whole 100k listing.
@@ -28,6 +29,15 @@ impl LocalFs {
     pub fn new(runtime: Handle) -> Self {
         Self { runtime }
     }
+
+    /// Runs blocking filesystem work on the runtime's blocking pool.
+    pub(crate) fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T, VfsError> + Send + 'static,
+    ) -> impl Future<Output = Result<T, VfsError>> + Send + 'static {
+        let task = self.runtime.spawn_blocking(work);
+        async move { task.await.map_err(|join| VfsError::Io { message: join.to_string() })? }
+    }
 }
 
 impl Lister for LocalFs {
@@ -44,10 +54,7 @@ impl Lister for LocalFs {
 
     async fn stat(&self, path: &StoragePath) -> Result<FileEntry, VfsError> {
         let path = path.clone();
-        self.runtime
-            .spawn_blocking(move || stat_blocking(&path))
-            .await
-            .map_err(|join| VfsError::Io { message: join.to_string() })?
+        self.blocking(move || stat_blocking(&path)).await
     }
 }
 
@@ -61,8 +68,7 @@ fn read_dir_in_batches(dir: &StoragePath, cancel: &CancelToken, sender: &BatchSe
             if cancel.is_cancelled() {
                 return Err(VfsError::Cancelled);
             }
-            // Entries that vanish or have non-UTF-8 names mid-listing are skipped;
-            // the watcher reports the former, the latter is a known M1 limitation.
+            // Entries that vanish mid-listing are skipped; the watcher reports them.
             let Ok(dir_entry) = dir_entry else { continue };
             let Some(entry) = entry_from_dir_entry(dir, &dir_entry) else { continue };
             batch.push(entry);
@@ -82,20 +88,15 @@ fn read_dir_in_batches(dir: &StoragePath, cancel: &CancelToken, sender: &BatchSe
 }
 
 fn entry_from_dir_entry(parent: &StoragePath, dir_entry: &fs::DirEntry) -> Option<FileEntry> {
-    let name = PathSegment::new(dir_entry.file_name().to_str()?).ok()?;
+    let name = PathSegment::from_bytes(dir_entry.file_name().as_bytes()).ok()?;
     let metadata = dir_entry.metadata().ok()?;
     Some(build_entry(parent, name, &dir_entry.path(), &metadata))
 }
 
 pub(crate) fn stat_blocking(path: &StoragePath) -> Result<FileEntry, VfsError> {
     let native = to_native(path)?;
-    let (parent, name) = parent_and_name(path, &native)?;
+    let parent = path.parent().ok_or(VfsError::InvalidPath(PathError::Root))?;
+    let name = segment_of(&native).ok_or(VfsError::InvalidPath(PathError::Root))?;
     let metadata = fs::symlink_metadata(&native).map_err(|e| from_io(&e))?;
     Ok(build_entry(&parent, name, &native, &metadata))
-}
-
-fn parent_and_name(path: &StoragePath, native: &Path) -> Result<(StoragePath, PathSegment), VfsError> {
-    let parent = path.parent().ok_or(VfsError::InvalidPath(PathError::Root))?;
-    let name = path.name().cloned().ok_or_else(|| non_utf8(native))?;
-    Ok((parent, name))
 }

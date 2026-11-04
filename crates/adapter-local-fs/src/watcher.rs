@@ -4,14 +4,14 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use application::ports::Watcher;
-use domain::{ChangeEvent, PathSegment, StoragePath, VfsError};
+use domain::{ChangeEvent, StoragePath, VfsError};
 use futures::Stream;
 use futures::channel::mpsc;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::error::from_io;
 use crate::lister::{LocalFs, stat_blocking};
-use crate::native_path::to_native;
+use crate::native_path::{segment_of, to_native};
 
 impl Watcher for LocalFs {
     fn watch(&self, dir: &StoragePath) -> Result<impl Stream<Item = ChangeEvent> + Send + 'static, VfsError> {
@@ -58,7 +58,7 @@ impl EventTranslator {
         if changed.parent() != Some(self.canonical.as_path()) {
             return None;
         }
-        let name = PathSegment::new(changed.file_name()?.to_str()?).ok()?;
+        let name = segment_of(changed)?;
         let path = self.dir.join(name);
         match stat_blocking(&path) {
             Ok(entry) => Some(ChangeEvent::Upserted(entry)),

@@ -66,6 +66,7 @@ pub mod qobject {
         #[qproperty(*mut ServicesHolder, services)]
         #[qproperty(*mut EntryListModel, model)]
         #[qproperty(QString, location)]
+        #[qproperty(QString, location_id)]
         #[qproperty(QString, title)]
         #[qproperty(QString, error_message)]
         #[qproperty(bool, loading)]
@@ -99,6 +100,10 @@ pub mod qobject {
         fn toggle_hidden_files(self: Pin<&mut FolderViewController>);
         #[qinvokable]
         fn sort_by(self: Pin<&mut FolderViewController>, column: SortColumn);
+
+        /// A file (not a folder) was activated; the window's OperationsController opens it.
+        #[qsignal]
+        fn open_requested(self: Pin<&mut FolderViewController>, location: QString);
     }
 
     impl cxx_qt::Threading for FolderViewController {}
@@ -125,6 +130,7 @@ pub struct FolderViewControllerRust {
     services: *mut ServicesHolder,
     model: *mut EntryListModel,
     location: QString,
+    location_id: QString,
     title: QString,
     error_message: QString,
     loading: bool,
@@ -149,6 +155,7 @@ impl Default for FolderViewControllerRust {
             services: std::ptr::null_mut(),
             model: std::ptr::null_mut(),
             location: QString::default(),
+            location_id: QString::default(),
             title: QString::default(),
             error_message: QString::default(),
             loading: false,
@@ -196,13 +203,18 @@ impl qobject::FolderViewController {
     }
 
     pub fn activate(self: Pin<&mut Self>, row: i32) {
-        let target = self.owned_model.as_ref().and_then(|model| {
+        let activated = self.owned_model.as_ref().and_then(|model| {
             let entry = model.rows().get(usize::try_from(row).ok()?)?;
-            entry.is_container.then(|| StoragePath::parse(&entry.location).ok()).flatten()
+            Some((entry.is_container, entry.location.clone()))
         });
-        // Opening files with their default application is milestone 2 (needs a Launcher port).
-        if let Some(target) = target {
-            self.navigate(target, HistoryMode::Record);
+        match activated {
+            Some((true, location)) => {
+                if let Ok(target) = StoragePath::decode(&location) {
+                    self.navigate(target, HistoryMode::Record);
+                }
+            }
+            Some((false, location)) => self.open_requested(QString::from(&location)),
+            None => {}
         }
     }
 
@@ -299,6 +311,7 @@ impl qobject::FolderViewController {
         let can_go_back = self.history.can_go_back();
         let can_go_forward = self.history.can_go_forward();
         self.as_mut().set_location(QString::from(&display_location(location, home)));
+        self.as_mut().set_location_id(QString::from(&location.encode()));
         self.as_mut().set_title(QString::from(&title));
         self.as_mut().set_can_go_up(!location.is_root());
         self.as_mut().set_can_go_back(can_go_back);

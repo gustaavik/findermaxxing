@@ -3,7 +3,7 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 1.** Window, tabs, and a lazily loaded, live-updating local folder view.
+**Status: milestone 2.** M1 (window, tabs, a lazily loaded live-updating folder view) plus file operations: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and are undoable.
 
 ## Prerequisites
 
@@ -51,6 +51,26 @@ cargo run -p app --release
   `Cmd+[` / `Cmd+]` (`Alt+←/→` on Linux) back/forward · `Return` or `Cmd/Ctrl+↓` open folder · `Cmd/Ctrl+Shift+.` hidden files · `Cmd+R` / `F5` reload.
 - Screen reader: VoiceOver/Orca read row names, buttons and column headers.
 
+## Manually testing M2
+
+```sh
+rm -rf /tmp/m2 && mkdir -p /tmp/m2/src/nested /tmp/m2/dst && echo one > /tmp/m2/src/a.txt && echo two > /tmp/m2/dst/a.txt
+dd if=/dev/zero of=/tmp/m2/src/big.bin bs=1m count=2000      # 2 GB; on APFS the copy is an instant clone
+cargo run -p app --release
+```
+
+- **Selection:** click; `Cmd/Ctrl`+click toggles; `Shift`+click or `Shift`+arrows extends; `Cmd/Ctrl+A` selects all; `Esc` clears.
+- **Copy and paste:** select `a.txt` in `/tmp/m2/src` and press `Cmd/Ctrl+C`. Open `/tmp/m2/dst` and press `Cmd/Ctrl+V`. The conflict dialog appears. Try Replace, Keep Both (`a 2.txt`), Skip and "Apply to all". Then press `Cmd/Ctrl+Z`: a Replace brings `two` back.
+- **Interop:** copy in Finder or Nautilus and paste here, or the other way round.
+- **Move Here:** `Cmd+Option+V` / `Ctrl+Alt+V`. Undo moves the items back.
+- **Progress:** to see the bar and cancel button on a big copy, copy `big.bin` to a USB stick or a non-APFS volume. On APFS the clone is instant.
+- **Rename:** `Return` (macOS) or `F2`. The name is preselected without its extension. `Esc` cancels.
+- **New folder:** `Cmd/Ctrl+Shift+N` creates "untitled folder" ("New Folder" on Linux) and starts renaming it.
+- **Trash:** `Cmd+Backspace` (macOS) or `Delete`. The item shows up in Finder's Trash or `~/.local/share/Trash`, and undo puts it back.
+- **Delete immediately:** `Cmd+Option+Backspace` / `Shift+Delete`, with a confirmation. This can't be undone.
+- **Open:** double-click or `Cmd/Ctrl+Down` on a file opens it in its default app.
+- **Context menu:** right-click on items or on empty space.
+
 ## Layout
 
 ```
@@ -58,9 +78,9 @@ crates/
   domain/                 pure entities and rules (StoragePath, FileEntry, SortSpec, VfsError, Capabilities)
   application/            ports (Lister, Watcher, Clock, ProviderFactory) + use cases + in-memory fakes
   vfs-contract-tests/     Liskov contract every provider must pass
-  adapter-local-fs/       file:// provider (std::fs + notify)
+  adapter-local-fs/       file:// provider: listing, watching, copy/move/remove, platform trash, launcher
   adapter-tokio-runtime/  Clock on tokio
-  presentation/           cxx-qt controller, C++ list model shim, QML
+  presentation/           cxx-qt controllers (folder view, operations), C++ list/job models, clipboard shim, QML
   app/                    composition root (the `findermaxxing` binary)
   arch-tests/             fails CI if layers point the wrong way
 xtask/                    cargo xtask ci | licenses

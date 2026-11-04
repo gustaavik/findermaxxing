@@ -7,8 +7,11 @@ Providers differ: S3 has no atomic rename or real directories, archives are read
 watch. Callers must not special-case providers (Liskov), and adding one must not edit existing code (Open/Closed).
 
 ## Decision
-- Small role traits: `Lister` and `Watcher` exist now. `Reader`, `Writer`, `Mover`, `Trasher` and
-  `MetadataEditor` arrive with the milestones that use them (M2/M3), not as speculative stubs.
+- Small role traits, each added with the milestone that uses it:
+  - M1: `Lister`, `Watcher`;
+  - M2: `Copier`, `Mover`, `Remover`, `FolderMaker`, `Trasher`, `Launcher` (ADR 0008);
+  - M4: streaming `Reader`/`Writer` for cross-provider copies;
+  - M7: `MetadataEditor`.
 - `MountHandle` holds an `Option<Arc<dyn Role>>` per role. A missing role yields
   `VfsError::Unsupported(capability)`, so a read-only provider implements nothing it can't do.
 - `Capabilities` is a value set: role presence (List, Watch, …) is derived automatically, and semantic

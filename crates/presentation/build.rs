@@ -5,7 +5,13 @@ const QML_MODULE_URI: &str = "FinderMaxxing";
 fn main() {
     macos_sdk_shims::provide_missing_frameworks();
 
-    let module = QmlModule::new(QML_MODULE_URI).qml_files(["qml/Main.qml", "qml/FolderView.qml", "qml/FileIcon.qml"]);
+    let module = QmlModule::new(QML_MODULE_URI).qml_files([
+        "qml/Main.qml",
+        "qml/FolderView.qml",
+        "qml/FileIcon.qml",
+        "qml/JobsPanel.qml",
+        "qml/ConflictDialog.qml",
+    ]);
 
     // SAFETY: only adds a language-standard flag; no other cc settings are touched.
     let builder = unsafe {
@@ -17,12 +23,21 @@ fn main() {
     builder
         .qt_module("Gui")
         .qt_module("Quick")
-        .files(["src/rows_bridge.rs", "src/services_bridge.rs", "src/folder_view_controller.rs"])
+        .files([
+            "src/rows_bridge.rs",
+            "src/services_bridge.rs",
+            "src/clipboard_bridge.rs",
+            "src/folder_view_controller.rs",
+            "src/operations_controller.rs",
+        ])
         .cpp_files([
             "cpp/entry_list_model.h",
             "cpp/entry_list_model.cpp",
             "cpp/services_holder.h",
             "cpp/services_holder.cpp",
+            "cpp/job_list_model.h",
+            "cpp/job_list_model.cpp",
+            "cpp/clipboard.cpp",
             "cpp/bootstrap.cpp",
         ])
         .build();

@@ -7,7 +7,13 @@ pub enum Capability {
     Read,
     Write,
     Watch,
+    Copy,
+    Move,
+    Remove,
+    CreateFolder,
     Trash,
+    /// Open an item with the system's default application.
+    Launch,
     /// Rename is a single atomic operation (false on S3: copy + delete).
     AtomicRename,
     ServerSideCopy,

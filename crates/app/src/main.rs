@@ -6,12 +6,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use adapter_local_fs::{LocalFs, LocalFsFactory, storage_path_from_native};
+use adapter_local_fs::{LocalFs, LocalFsFactory, LocalTrash, storage_path_from_native};
 use adapter_tokio_runtime::TokioClock;
 use application::ProviderRegistry;
 use application::ports::MountResolver;
 use application::use_cases::{CoalesceWindow, ListDirectory, WatchDirectory};
-use presentation::AppServices;
+use presentation::{AppServices, FileOperations};
+use tokio::runtime::Handle;
 
 const HOME_VARIABLE: &str = "HOME";
 const FALLBACK_HOME: &str = "/";
@@ -44,7 +45,8 @@ fn start() -> Result<i32, StartupError> {
     let registry = build_registry(runtime.handle().clone())?;
     let services = AppServices::new(
         Arc::new(ListDirectory::new(registry.clone())),
-        Arc::new(WatchDirectory::new(registry, Arc::new(TokioClock), CoalesceWindow::default())),
+        Arc::new(WatchDirectory::new(registry.clone(), Arc::new(TokioClock), CoalesceWindow::default())),
+        FileOperations::new(&registry),
         runtime.handle().clone(),
         storage_path_from_native(&home_dir())?,
     );
@@ -55,9 +57,9 @@ fn start() -> Result<i32, StartupError> {
 }
 
 /// Every provider is registered here and nowhere else (Open/Closed).
-fn build_registry(runtime: tokio::runtime::Handle) -> Result<Arc<dyn MountResolver>, StartupError> {
-    let registry = ProviderRegistry::default().with_provider(Arc::new(LocalFsFactory::new(LocalFs::new(runtime))?))?;
-    Ok(Arc::new(registry))
+fn build_registry(runtime: Handle) -> Result<Arc<dyn MountResolver>, StartupError> {
+    let local = LocalFsFactory::new(LocalFs::new(runtime.clone()), LocalTrash::platform_default(runtime))?;
+    Ok(Arc::new(ProviderRegistry::default().with_provider(Arc::new(local))?))
 }
 
 fn home_dir() -> PathBuf {

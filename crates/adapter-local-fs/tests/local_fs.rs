@@ -93,3 +93,39 @@ async fn large_dir_streams_quickly() {
     assert!(first_batch_latency < FIRST_BATCH_BUDGET, "first batch took {first_batch_latency:?}");
     assert!(total_latency < FULL_LISTING_BUDGET, "full listing took {total_latency:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn freedesktop_trash_round_trips_through_the_port() {
+    use adapter_local_fs::{FreedesktopTrash, LocalTrash};
+    use application::ports::Trasher;
+
+    let home = tempfile::tempdir().unwrap();
+    let trash = LocalTrash::freedesktop(
+        tokio::runtime::Handle::current(),
+        FreedesktopTrash::with_home_trash(home.path().join("Trash")),
+    );
+    let item = home.path().join("notes.txt");
+    std::fs::write(&item, b"remember").unwrap();
+
+    let ticket = trash.trash(&storage_path_from_native(&item).unwrap()).await.unwrap();
+    assert!(!item.exists());
+    assert!(home.path().join("Trash/info/notes.txt.trashinfo").exists());
+
+    trash.restore(&ticket).await.unwrap();
+    assert_eq!(std::fs::read(&item).unwrap(), b"remember");
+    assert!(!home.path().join("Trash/info/notes.txt.trashinfo").exists(), "restore cleans up the info file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_utf8_names_are_listed_and_round_trip() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let odd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+    // macOS (APFS) refuses invalid UTF-8 names; the case only exists on Linux.
+    if std::fs::write(&odd, b"x").is_err() {
+        return;
+    }
+    let entries = list(dir.path()).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name().as_bytes(), b"caf\xe9.txt");
+}

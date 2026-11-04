@@ -1,5 +1,5 @@
-//! The row type stored by the C++ `EntryListModel`, plus the vector edits it
-//! delegates back to Rust (`rust::Vec` has no insert/erase on the C++ side).
+//! Row types stored by the C++ list models, plus the vector edits
+//! `EntryListModel` delegates back to Rust (`rust::Vec` has no insert/erase in C++).
 
 #[cxx::bridge]
 pub(crate) mod ffi {
@@ -16,6 +16,17 @@ pub(crate) mod ffi {
         is_hidden: bool,
     }
 
+    /// One running job in the jobs panel.
+    #[derive(Debug, Clone, PartialEq)]
+    struct JobRow {
+        id: i32,
+        title: String,
+        detail: String,
+        /// Completed share in 0..=1; meaningful only when `determinate`.
+        fraction: f64,
+        determinate: bool,
+    }
+
     extern "Rust" {
         fn rows_insert(rows: &mut Vec<EntryRow>, index: usize, row: EntryRow);
         fn rows_remove(rows: &mut Vec<EntryRow>, index: usize);
@@ -25,7 +36,7 @@ pub(crate) mod ffi {
     impl Vec<EntryRow> {}
 }
 
-pub(crate) use ffi::EntryRow;
+pub(crate) use ffi::{EntryRow, JobRow};
 
 // The C++ model checks bounds before calling these; out-of-range indices
 // are ignored rather than panicking across the FFI boundary. Signatures take

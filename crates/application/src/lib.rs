@@ -2,6 +2,7 @@
 //! `futures` traits; concrete adapters are injected by the composition root.
 
 pub mod cancel;
+pub mod operations;
 pub mod ports;
 pub mod registry;
 pub mod use_cases;

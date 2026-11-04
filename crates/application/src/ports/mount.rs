@@ -3,40 +3,64 @@ use std::sync::Arc;
 
 use domain::{Capabilities, Capability, MountId, Scheme, VfsError};
 
-use super::{DynLister, DynWatcher};
+use super::{DynCopier, DynFolderMaker, DynLauncher, DynLister, DynMover, DynRemover, DynTrasher, DynWatcher};
 
-/// The roles one mounted provider offers. Absent roles are `None`, so a
-/// read-only provider never has to stub out write methods; asking for a
-/// missing role yields `VfsError::Unsupported`.
-#[derive(Clone)]
-pub struct MountHandle {
-    capabilities: Capabilities,
-    lister: Option<Arc<dyn DynLister>>,
-    watcher: Option<Arc<dyn DynWatcher>>,
+/// Declares the role slots of [`MountHandle`]: one optional `Arc<dyn Role>`
+/// each, a builder method that also records the matching [`Capability`], and
+/// an accessor that reports `Unsupported(capability)` when the role is absent.
+macro_rules! mount_roles {
+    ($($role:ident: $dyn_trait:ident => $capability:ident),+ $(,)?) => {
+        /// The roles one mounted provider offers. Absent roles are `None`, so a
+        /// read-only provider never has to stub out write methods.
+        #[derive(Clone)]
+        pub struct MountHandle {
+            capabilities: Capabilities,
+            $($role: Option<Arc<dyn $dyn_trait>>,)+
+        }
+
+        impl MountHandle {
+            /// `semantics` are guarantees beyond role presence (`AtomicRename`, …).
+            #[must_use]
+            pub fn builder(semantics: Capabilities) -> MountHandleBuilder {
+                MountHandleBuilder { handle: Self { capabilities: semantics, $($role: None,)+ } }
+            }
+
+            $(
+                #[doc = concat!("# Errors\n`Unsupported(", stringify!($capability), ")` if the provider lacks this role.")]
+                pub fn $role(&self) -> Result<Arc<dyn $dyn_trait>, VfsError> {
+                    self.$role.clone().ok_or(VfsError::Unsupported(Capability::$capability))
+                }
+            )+
+        }
+
+        impl MountHandleBuilder {
+            $(
+                #[must_use]
+                pub fn $role(mut self, $role: Arc<dyn $dyn_trait>) -> Self {
+                    self.handle.$role = Some($role);
+                    self.handle.capabilities = self.handle.capabilities.with(Capability::$capability);
+                    self
+                }
+            )+
+        }
+    };
+}
+
+mount_roles! {
+    lister: DynLister => List,
+    watcher: DynWatcher => Watch,
+    copier: DynCopier => Copy,
+    mover: DynMover => Move,
+    remover: DynRemover => Remove,
+    folder_maker: DynFolderMaker => CreateFolder,
+    trasher: DynTrasher => Trash,
+    launcher: DynLauncher => Launch,
 }
 
 impl MountHandle {
-    /// `semantics` are guarantees beyond role presence (`AtomicRename`, …).
-    #[must_use]
-    pub fn builder(semantics: Capabilities) -> MountHandleBuilder {
-        MountHandleBuilder { handle: Self { capabilities: semantics, lister: None, watcher: None } }
-    }
-
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
-    }
-
-    /// # Errors
-    /// `Unsupported(List)` if the provider cannot list.
-    pub fn lister(&self) -> Result<Arc<dyn DynLister>, VfsError> {
-        self.lister.clone().ok_or(VfsError::Unsupported(Capability::List))
-    }
-
-    /// # Errors
-    /// `Unsupported(Watch)` if the provider cannot watch.
-    pub fn watcher(&self) -> Result<Arc<dyn DynWatcher>, VfsError> {
-        self.watcher.clone().ok_or(VfsError::Unsupported(Capability::Watch))
     }
 }
 
@@ -52,20 +76,6 @@ pub struct MountHandleBuilder {
 }
 
 impl MountHandleBuilder {
-    #[must_use]
-    pub fn lister(mut self, lister: Arc<dyn DynLister>) -> Self {
-        self.handle.lister = Some(lister);
-        self.handle.capabilities = self.handle.capabilities.with(Capability::List);
-        self
-    }
-
-    #[must_use]
-    pub fn watcher(mut self, watcher: Arc<dyn DynWatcher>) -> Self {
-        self.handle.watcher = Some(watcher);
-        self.handle.capabilities = self.handle.capabilities.with(Capability::Watch);
-        self
-    }
-
     #[must_use]
     pub fn build(self) -> MountHandle {
         self.handle

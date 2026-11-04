@@ -183,17 +183,21 @@ mod tests {
 
     use super::*;
     use application::ProviderRegistry;
+    use application::ports::MountResolver;
+
+    use crate::services::FileOperations;
     use application::testing::{FakeVfs, InstantClock};
     use application::use_cases::{CoalesceWindow, ListDirectory, WatchDirectory};
 
     const EVENT_DEADLINE: Duration = Duration::from_secs(5);
 
     fn services(fake: &FakeVfs) -> AppServices {
-        let registry: Arc<ProviderRegistry> =
+        let registry: Arc<dyn MountResolver> =
             Arc::new(ProviderRegistry::default().with_provider(fake.clone().into_factory()).unwrap());
         AppServices::new(
             Arc::new(ListDirectory::new(registry.clone())),
-            Arc::new(WatchDirectory::new(registry, Arc::new(InstantClock), CoalesceWindow::default())),
+            Arc::new(WatchDirectory::new(registry.clone(), Arc::new(InstantClock), CoalesceWindow::default())),
+            FileOperations::new(&registry),
             tokio::runtime::Handle::current(),
             fake.path("/"),
         )

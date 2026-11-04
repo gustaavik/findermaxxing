@@ -39,6 +39,10 @@ pub enum VfsError {
     UnknownScheme(String),
     #[error("conflicting concurrent modification")]
     Conflict,
+    #[error("source and destination are on different devices")]
+    CrossDevice,
+    #[error("the item is not in the trash any more")]
+    NotInTrash,
     #[error("temporary failure")]
     Transient { retry_after: Option<Duration> },
     #[error("invalid path: {0}")]

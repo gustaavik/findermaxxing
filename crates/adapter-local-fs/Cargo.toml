@@ -1,6 +1,6 @@
 [package]
 name = "adapter-local-fs"
-description = "file:// provider: Lister + Watcher over the local filesystem."
+description = "file:// provider: every Vfs role over the local filesystem, plus the platform trash."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,11 @@ application.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 notify.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
 vfs-contract-tests.workspace = true

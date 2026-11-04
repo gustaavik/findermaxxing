@@ -65,11 +65,11 @@ impl SortSpec {
 }
 
 fn by_name(a: &FileEntry, b: &FileEntry) -> Ordering {
-    natural_cmp(a.name().as_str(), b.name().as_str())
+    natural_cmp(&a.name().display_name(), &b.name().display_name()).then_with(|| a.name().cmp(b.name()))
 }
 
 fn extension(entry: &FileEntry) -> String {
-    entry.name().as_str().rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).unwrap_or_default()
+    entry.name().stem_and_extension().1.map(|ext| String::from_utf8_lossy(ext).to_lowercase()).unwrap_or_default()
 }
 
 /// Case-insensitive "human" ordering: `file2` < `file10`. Falls back to a

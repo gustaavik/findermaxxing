@@ -5,6 +5,7 @@ use domain::{Capabilities, Capability, MountId, PathError, Scheme, VfsError};
 
 use crate::lister::LocalFs;
 use crate::native_path::LOCAL_SCHEME;
+use crate::trash::LocalTrash;
 
 const LOCAL_SEMANTICS: Capabilities = Capabilities::empty()
     .with(Capability::AtomicRename)
@@ -18,13 +19,14 @@ const LOCAL_SEMANTICS: Capabilities = Capabilities::empty()
 pub struct LocalFsFactory {
     scheme: Scheme,
     fs: Arc<LocalFs>,
+    trash: Arc<LocalTrash>,
 }
 
 impl LocalFsFactory {
     /// # Errors
     /// Never in practice; the scheme literal is validated like any other.
-    pub fn new(fs: LocalFs) -> Result<Self, PathError> {
-        Ok(Self { scheme: Scheme::new(LOCAL_SCHEME)?, fs: Arc::new(fs) })
+    pub fn new(fs: LocalFs, trash: LocalTrash) -> Result<Self, PathError> {
+        Ok(Self { scheme: Scheme::new(LOCAL_SCHEME)?, fs: Arc::new(fs), trash: Arc::new(trash) })
     }
 }
 
@@ -37,6 +39,16 @@ impl ProviderFactory for LocalFsFactory {
         if !mount.authority().is_empty() {
             return Err(VfsError::InvalidPath(PathError::InvalidAuthority(mount.authority().to_owned())));
         }
-        Ok(MountHandle::builder(LOCAL_SEMANTICS).lister(self.fs.clone()).watcher(self.fs.clone()).build())
+        let fs = &self.fs;
+        Ok(MountHandle::builder(LOCAL_SEMANTICS)
+            .lister(fs.clone())
+            .watcher(fs.clone())
+            .copier(fs.clone())
+            .mover(fs.clone())
+            .remover(fs.clone())
+            .folder_maker(fs.clone())
+            .launcher(fs.clone())
+            .trasher(self.trash.clone())
+            .build())
     }
 }

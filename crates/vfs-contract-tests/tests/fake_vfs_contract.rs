@@ -29,11 +29,15 @@ impl VfsFixture for FakeFixture {
     }
 
     async fn create_file(&self, relative: &str, contents: &[u8]) {
-        self.fake.add_file(&format!("{ROOT}/{relative}"), contents.len() as u64);
+        self.fake.add_file_with(&format!("{ROOT}/{relative}"), contents);
     }
 
     async fn remove_file(&self, relative: &str) {
         self.fake.remove(&format!("{ROOT}/{relative}"));
+    }
+
+    async fn read_file(&self, relative: &str) -> Option<Vec<u8>> {
+        self.fake.contents(&format!("{ROOT}/{relative}"))
     }
 }
 
@@ -44,3 +48,13 @@ async fn fixture() -> FakeFixture {
 }
 
 vfs_contract_tests!(fixture);
+
+mod mutation {
+    use super::fixture;
+    vfs_contract_tests::mutation_contract_tests!(fixture);
+}
+
+mod trash {
+    use super::fixture;
+    vfs_contract_tests::trash_contract_tests!(fixture);
+}

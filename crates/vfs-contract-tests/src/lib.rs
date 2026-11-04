@@ -1,8 +1,9 @@
-//! Shared behavioural contract for `Lister` + `Watcher` implementations.
+//! Shared behavioural contract for every `Vfs` role.
 //!
 //! An adapter proves conformance by implementing [`VfsFixture`] and invoking
-//! [`vfs_contract_tests!`] in its test suite, which expands to one
-//! `#[tokio::test]` per contract case.
+//! [`vfs_contract_tests!`] (listing + watching), [`mutation_contract_tests!`]
+//! (copy, move, remove, create folder) and [`trash_contract_tests!`] for the
+//! roles it offers. Each expands to one `#[tokio::test]` per contract case.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "this crate is test code")]
 
@@ -23,7 +24,8 @@ pub const WATCH_DEADLINE: Duration = Duration::from_secs(5);
 
 /// A fresh, empty working directory on the provider under test.
 pub trait VfsFixture: Send + Sync {
-    type Vfs: Lister + Watcher;
+    /// The provider under test. Each contract case states the roles it needs.
+    type Vfs;
 
     fn vfs(&self) -> &Self::Vfs;
 
@@ -35,7 +37,13 @@ pub trait VfsFixture: Send + Sync {
     fn create_file(&self, relative: &str, contents: &[u8]) -> impl Future<Output = ()> + Send;
 
     fn remove_file(&self, relative: &str) -> impl Future<Output = ()> + Send;
+
+    /// File contents, or `None` if nothing exists at `relative`.
+    fn read_file(&self, relative: &str) -> impl Future<Output = Option<Vec<u8>>> + Send;
 }
+
+mod mutation;
+pub use mutation::*;
 
 /// Expands to one async test per contract case for the given fixture constructor.
 #[macro_export]
@@ -65,22 +73,31 @@ macro_rules! vfs_contract_tests {
     };
 }
 
-fn child(fixture: &impl VfsFixture, name: &str) -> StoragePath {
+pub(crate) fn child(fixture: &impl VfsFixture, name: &str) -> StoragePath {
     fixture.root().join(PathSegment::new(name).unwrap())
 }
 
-async fn list_all(fixture: &impl VfsFixture, dir: &StoragePath) -> Result<Vec<FileEntry>, VfsError> {
+pub(crate) async fn list_all<F: VfsFixture>(fixture: &F, dir: &StoragePath) -> Result<Vec<FileEntry>, VfsError>
+where
+    F::Vfs: Lister,
+{
     let batches: Vec<Vec<FileEntry>> = fixture.vfs().list(dir, CancelToken::never()).try_collect().await?;
     let mut entries: Vec<FileEntry> = batches.into_iter().flatten().collect();
     entries.sort_by(|a, b| a.name().cmp(b.name()));
     Ok(entries)
 }
 
-pub async fn empty_dir_lists_nothing(fixture: &impl VfsFixture) {
+pub async fn empty_dir_lists_nothing<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     assert_eq!(list_all(fixture, &fixture.root()).await, Ok(vec![]));
 }
 
-pub async fn lists_children_with_kinds_and_sizes(fixture: &impl VfsFixture) {
+pub async fn lists_children_with_kinds_and_sizes<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     fixture.create_dir("sub").await;
     fixture.create_file("hello.txt", b"hello").await;
 
@@ -99,16 +116,25 @@ pub async fn lists_children_with_kinds_and_sizes(fixture: &impl VfsFixture) {
     assert!(entries.iter().all(|e| e.path().is_child_of(&fixture.root())));
 }
 
-pub async fn missing_dir_is_not_found(fixture: &impl VfsFixture) {
+pub async fn missing_dir_is_not_found<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     assert_eq!(list_all(fixture, &child(fixture, "missing")).await, Err(VfsError::NotFound));
 }
 
-pub async fn file_is_not_a_directory(fixture: &impl VfsFixture) {
+pub async fn file_is_not_a_directory<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     fixture.create_file("plain", b"x").await;
     assert_eq!(list_all(fixture, &child(fixture, "plain")).await, Err(VfsError::NotADirectory));
 }
 
-pub async fn batches_respect_limit(fixture: &impl VfsFixture) {
+pub async fn batches_respect_limit<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     let total = LIST_BATCH_SIZE * 2 + 1;
     for i in 0..total {
         fixture.create_file(&format!("f{i:05}"), b"").await;
@@ -119,7 +145,10 @@ pub async fn batches_respect_limit(fixture: &impl VfsFixture) {
     assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), total);
 }
 
-pub async fn cancellation_ends_listing(fixture: &impl VfsFixture) {
+pub async fn cancellation_ends_listing<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     for i in 0..LIST_BATCH_SIZE * 2 {
         fixture.create_file(&format!("f{i:05}"), b"").await;
     }
@@ -131,22 +160,34 @@ pub async fn cancellation_ends_listing(fixture: &impl VfsFixture) {
     assert_eq!(items.iter().filter(|i| i.is_err()).count(), 1, "nothing may follow Cancelled");
 }
 
-pub async fn stat_matches_listing(fixture: &impl VfsFixture) {
+pub async fn stat_matches_listing<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     fixture.create_file("a.bin", b"1234").await;
     let listed = list_all(fixture, &fixture.root()).await.unwrap();
     let stat = fixture.vfs().stat(&child(fixture, "a.bin")).await.unwrap();
     assert_eq!(listed, vec![stat]);
 }
 
-pub async fn stat_missing_is_not_found(fixture: &impl VfsFixture) {
+pub async fn stat_missing_is_not_found<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Lister,
+{
     assert_eq!(fixture.vfs().stat(&child(fixture, "nope")).await, Err(VfsError::NotFound));
 }
 
-pub async fn watch_missing_dir_is_not_found(fixture: &impl VfsFixture) {
+pub async fn watch_missing_dir_is_not_found<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Watcher,
+{
     assert!(matches!(fixture.vfs().watch(&child(fixture, "missing")), Err(VfsError::NotFound)));
 }
 
-pub async fn watcher_reports_create_and_remove(fixture: &impl VfsFixture) {
+pub async fn watcher_reports_create_and_remove<F: VfsFixture>(fixture: &F)
+where
+    F::Vfs: Watcher,
+{
     let target = child(fixture, "watched.txt");
     let mut events = Box::pin(fixture.vfs().watch(&fixture.root()).unwrap());
 

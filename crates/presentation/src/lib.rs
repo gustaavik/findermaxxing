@@ -4,9 +4,14 @@
 //! use-case output into view-model updates. Everything testable without Qt
 //! (`view_model`, `history`, `row_format`, `error_messages`) is plain Rust.
 
+mod clipboard_bridge;
 mod error_messages;
+mod file_urls;
 mod folder_view_controller;
 mod history;
+mod job_reporting;
+mod job_text;
+mod operations_controller;
 mod row_format;
 mod rows_bridge;
 mod services;
@@ -14,7 +19,7 @@ mod services_bridge;
 mod session;
 mod view_model;
 
-pub use services::AppServices;
+pub use services::{AppServices, FileOperations};
 
 /// Starts the Qt event loop and blocks until the last window closes.
 /// Returns the process exit code.

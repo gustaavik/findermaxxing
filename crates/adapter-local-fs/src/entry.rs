@@ -7,7 +7,7 @@ use domain::{
     Visibility,
 };
 
-const HIDDEN_PREFIX: char = '.';
+const HIDDEN_PREFIX: u8 = b'.';
 
 /// Builds a [`FileEntry`] from `lstat` metadata of `native` (a child of `parent`).
 pub(crate) fn build_entry(parent: &StoragePath, name: PathSegment, native: &Path, metadata: &Metadata) -> FileEntry {
@@ -51,7 +51,7 @@ fn to_timestamp(time: SystemTime) -> Timestamp {
 }
 
 fn visibility(name: &PathSegment, metadata: &Metadata) -> Visibility {
-    if name.as_str().starts_with(HIDDEN_PREFIX) || has_hidden_flag(metadata) {
+    if name.as_bytes().first() == Some(&HIDDEN_PREFIX) || has_hidden_flag(metadata) {
         Visibility::Hidden
     } else {
         Visibility::Visible

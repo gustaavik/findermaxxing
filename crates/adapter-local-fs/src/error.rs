@@ -10,6 +10,7 @@ pub(crate) fn from_io(error: &io::Error) -> VfsError {
         io::ErrorKind::AlreadyExists => VfsError::AlreadyExists,
         io::ErrorKind::NotADirectory => VfsError::NotADirectory,
         io::ErrorKind::IsADirectory => VfsError::IsADirectory,
+        io::ErrorKind::CrossesDevices => VfsError::CrossDevice,
         io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
             VfsError::Transient { retry_after: None }
         }
