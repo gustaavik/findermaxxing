@@ -1,0 +1,29 @@
+[package]
+name = "adapter-imaging"
+description = "ImageConverter, ImageFingerprinter and ImageMetadata: image (decode/encode/resize), image_hasher, kamadak-exif and img-parts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+image.workspace = true
+image_hasher.workspace = true
+kamadak-exif.workspace = true
+img-parts.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile.workspace = true
+image = { workspace = true, features = ["png", "jpeg"] }
+img-parts.workspace = true
+kamadak-exif.workspace = true
+
+[lints]
+workspace = true

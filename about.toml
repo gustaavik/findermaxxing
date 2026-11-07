@@ -1,4 +1,6 @@
 # cargo-about: generates the third-party notice shipped with the app (`cargo xtask licenses`).
+# RARLAB's UnRAR license isn't a crate license (unrar_sys vendors the source),
+# so about.hbs carries its text directly (ADR 0027).
 accepted = [
     "MIT",
     "Apache-2.0",
@@ -10,7 +12,10 @@ accepted = [
     "CC0-1.0",
     "Unicode-3.0",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
 ]
 ignore-build-dependencies = false
 ignore-dev-dependencies = true
 private = { ignore = true }
+

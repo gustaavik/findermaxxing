@@ -43,8 +43,10 @@ pub trait VfsFixture: Send + Sync {
 }
 
 mod mutation;
+mod permissions;
 mod stream;
 pub use mutation::*;
+pub use permissions::*;
 pub use stream::*;
 
 /// Listing and watching: what every local-style provider offers.

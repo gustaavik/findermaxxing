@@ -25,6 +25,10 @@ pub enum Capability {
     ListVersions,
     /// Content type and custom metadata can be edited.
     EditMetadata,
+    /// POSIX permissions can be changed.
+    EditPermissions,
+    /// Files can be overwritten before removal (local disks only).
+    SecureErase,
     /// Rename is a single atomic operation (false on S3: copy + delete).
     AtomicRename,
     ServerSideCopy,

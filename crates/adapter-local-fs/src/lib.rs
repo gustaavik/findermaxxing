@@ -1,12 +1,14 @@
 //! `file://` provider.
 //!
 //! Implements `Lister`, `Watcher`, `Copier`, `Mover`, `Remover`,
-//! `FolderMaker`, `Launcher`, `Materializer`, `Reader`, `Writer` and (via
+//! `FolderMaker`, `Launcher`, `Materializer`, `Reader`, `Writer`, `PermissionEditor`,
+//! `SecureEraser` and (via
 //! [`LocalTrash`]) `Trasher`; plus [`LocalOpener`] and [`LocalVolumes`]. Proven by the
 //! shared contract suites in `tests/contract.rs` plus local-only cases in
 //! `tests/local_fs.rs`. Unix only (macOS, Linux).
 
 mod entry;
+mod erase;
 mod error;
 mod factory;
 pub(crate) mod launcher;

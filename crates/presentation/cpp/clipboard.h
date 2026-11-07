@@ -11,5 +11,6 @@ rust::Vec<rust::String> clipboardUrls();
 
 // Plain text (e.g. a share link).
 void setClipboardText(rust::Str text);
+rust::String clipboardText();
 
 #endif // FINDERMAXXING_CLIPBOARD_H

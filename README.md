@@ -3,10 +3,11 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 6.**
+**Status: milestone 7a** (7b, AI organization suggestions, is next).
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
+- M7a: utilities: compress and extract (zip, 7z, tar.gz/xz/zst/bz2; RAR extract), checksums with verification, a duplicate finder (including look-alike photos), a disk-usage treemap, image convert/resize and metadata viewer/cleaner, batch permissions, secure delete, and a built-in terminal that follows the folder. Everything that changes files can be undone, except secure delete.
 - M6: AI search: find files by what they say or show, in your own words and many languages ("strømregning fra marts", "photos of the cats"). Local models on candle, downloaded once after you agree; nothing leaves the machine.
 - M5b: Google Drive, Dropbox and OneDrive, signed in through the browser (OAuth + PKCE), with Google Docs exported to Office formats. Needs OAuth client IDs: [docs/oauth-setup.md](docs/oauth-setup.md).
 - M5a: SFTP, WebDAV and SMB servers; iCloud Drive and other synced cloud folders under Locations; a size-limited cache with *Keep Available Offline*; transfers that resume after a quit or crash; drag and drop with other apps.
@@ -201,6 +202,44 @@ cargo run -p app --release
 - *Turn Off…* → *Also delete the index and the downloaded models* removes everything from disk.
 - Real-model check: `FM_MODELS_DIR=/somewhere cargo test --release -p adapter-candle-embeddings --test real_models -- --ignored --nocapture`.
 
+## Manually testing M7a
+
+```sh
+mkdir -p ~/fm-m7/sub && cd ~/fm-m7
+echo "same content" > a.txt && cp a.txt sub/b.txt
+printf '#!/bin/sh\necho hi\n' > run.sh && chmod 644 run.sh
+sips -s format jpeg /System/Library/CoreServices/Dock.app/Contents/Resources/url@2x.png --out photo.jpg   # macOS; any JPEG works
+cargo run -p app
+```
+
+Right-click items for **Tools**:
+- **Compress…**: pick a format. `Archive.zip` (or `sub.zip` for one item) appears; Undo removes it. Open it in
+  Finder/Archive Utility or `unzip -l`.
+- **Extract Here** on a zip, 7z, tar.* or RAR: the contents land in a new folder named after the archive.
+  Links and `../` paths are skipped and reported.
+- **Checksums…** on a file: MD5, SHA-1, SHA-256 and BLAKE3. Paste a digest to compare; a `SHA256SUMS` or
+  `name.sha256` next to the file is checked automatically.
+- **Convert or Resize Images…** / **Image Metadata…** on `photo.jpg`: convert to PNG at 50 %. The metadata tab
+  flags GPS and serial numbers; *Remove Metadata* replaces the photo, and Undo brings the original back.
+- **Permissions…** on `run.sh`: tick Owner → Execute, then Apply (`chmod` + Undo). With a folder selected,
+  *Apply to* reaches inside. Works on SFTP servers too.
+- **Find Duplicates…**: set *At least* to 0 KB and find `a.txt` / `sub/b.txt`. Tick *Look-alike photos* to pair
+  `photo.jpg` with its PNG. Ticked copies go to the Trash.
+- **Disk Usage…**: a treemap; click folders to go in, *Up* to come back.
+- **Securely Delete…** (local folders): overwrites, then deletes; not undoable. The dialog explains the SSD
+  caveat.
+- **Terminal**: `>_` in the toolbar or Ctrl+`. It starts in the current folder and follows when you change
+  folders while the shell is idle. Try `vim` and `htop`; copy and paste with ⌘C/⌘V (Ctrl+Shift+C/V on Linux).
+
+Tests touching real tools:
+
+```sh
+cargo test -p adapter-archives      # every format round-trips; zips/7z open in `7z`, tar.xz in `bsdtar` when installed
+cargo test -p adapter-terminal      # a real login shell on a real PTY
+docker run -d --rm --name findermaxxing-sftp -p 127.0.0.1:2222:22 atmoz/sftp fmtest:fmtest-secret:::upload
+cargo test -p adapter-sftp --test sftp_contract -- --ignored permissions
+```
+
 ## Layout
 
 ```
@@ -222,6 +261,10 @@ crates/
   mock-cloud/             test doubles of the three APIs and an OAuth server (tests and mock-cloud-server only)
   adapter-content-extract/ text from documents for the index: PDF, Office/OpenDocument, EPUB, HTML, RTF, plain text
   adapter-candle-embeddings/ local embedding models on candle (e5, CLIP), verified downloads from pinned revisions
+  adapter-checksums/      ContentHasher: MD5, SHA-1, SHA-256, BLAKE3
+  adapter-archives/       zip, tar (gz, bz2, xz, zst), 7z read/write; RAR extraction through RARLAB's unRAR
+  adapter-imaging/        image conversion and resizing, perceptual hashes, EXIF read and lossless stripping
+  adapter-terminal/       the terminal: login shell on a PTY, emulated by alacritty_terminal
   adapter-smb/            smb:// provider (pure-Rust smb2): Windows and NAS shares, resumable writes
   adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal,
                           content index (int8 vectors) and AI settings

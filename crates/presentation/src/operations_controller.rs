@@ -105,6 +105,23 @@ pub mod qobject {
         AlwaysMove,
     }
 
+    /// How converted images are sized.
+    #[qenum(OperationsController)]
+    enum ResizeMode {
+        KeepSize,
+        ScalePercent,
+        FitWithin,
+    }
+
+    /// Which items a permission change reaches.
+    #[qenum(OperationsController)]
+    enum PermissionScope {
+        SelectedOnly,
+        AllInside,
+        FilesInside,
+        FoldersInside,
+    }
+
     #[qenum(OperationsController)]
     enum AnswerReach {
         ThisItem,
@@ -173,6 +190,43 @@ pub mod qobject {
         #[qinvokable]
         fn remove_offline_copy(self: Pin<&mut OperationsController>, location: &QString);
         /// Looks for transfers a quit or crash interrupted (at start-up).
+        /// Archive formats for "Compress", by display name.
+        #[qinvokable]
+        fn archive_formats(self: &OperationsController) -> QStringList;
+        #[qinvokable]
+        fn compress(self: Pin<&mut OperationsController>, locations: &QStringList, format: i32);
+        #[qinvokable]
+        fn can_extract(self: &OperationsController, location: &QString) -> bool;
+        #[qinvokable]
+        fn extract(self: Pin<&mut OperationsController>, location: &QString);
+        #[qinvokable]
+        fn image_formats(self: &OperationsController) -> QStringList;
+        #[qinvokable]
+        fn is_image(self: &OperationsController, location: &QString) -> bool;
+        /// `size` is a percentage for `ScalePercent`, the longest side in pixels for `FitWithin`.
+        #[qinvokable]
+        fn convert_images(
+            self: Pin<&mut OperationsController>,
+            locations: &QStringList,
+            format: i32,
+            mode: ResizeMode,
+            size: i32,
+            quality: i32,
+        );
+        #[qinvokable]
+        fn clean_metadata(self: Pin<&mut OperationsController>, locations: &QStringList);
+        /// `edit`: nine characters (owner, group, others × read, write, execute),
+        /// each `+` set, `-` clear or `=` leave as is.
+        #[qinvokable]
+        fn change_permissions(
+            self: Pin<&mut OperationsController>,
+            locations: &QStringList,
+            edit: &QString,
+            scope: PermissionScope,
+        );
+        #[qinvokable]
+        fn secure_delete(self: Pin<&mut OperationsController>, locations: &QStringList);
+
         #[qinvokable]
         fn check_interrupted(self: Pin<&mut OperationsController>);
         #[qinvokable]
@@ -219,7 +273,7 @@ use qobject::{
     AnswerReach, ConflictAnswer, CostAnswer, CostReach, DropOperation, JobListModel, PasteMode, ServicesHolder,
 };
 
-const NOT_READY_MESSAGE: &str = "The application is still starting.";
+pub(crate) const NOT_READY_MESSAGE: &str = "The application is still starting.";
 const INVALID_NAME_MESSAGE: &str = "Names can't be empty or contain \u{201c}/\u{201d}.";
 const PREPARING_DETAIL: &str = "Preparing…";
 const LOCATION_SEPARATOR: char = '\n';
@@ -718,14 +772,14 @@ impl qobject::OperationsController {
         self.refresh_history();
     }
 
-    fn app_services(&self) -> Option<AppServices> {
+    pub(crate) fn app_services(&self) -> Option<AppServices> {
         // SAFETY: the holder is created by the bootstrap before the QML engine
         // and destroyed after it, so it outlives every controller.
         let holder = unsafe { self.services().as_ref() }?;
         Some(holder.services().clone())
     }
 
-    fn report(self: Pin<&mut Self>, message: &str) {
+    pub(crate) fn report(self: Pin<&mut Self>, message: &str) {
         self.set_error_message(QString::from(message));
     }
 
@@ -765,7 +819,7 @@ impl qobject::OperationsController {
         self.show_next_conflict();
     }
 
-    fn spawn_job<Fut>(
+    pub(crate) fn spawn_job<Fut>(
         mut self: Pin<&mut Self>,
         title: String,
         affected: Vec<StoragePath>,
@@ -824,7 +878,7 @@ fn job_row(id: i32, title: String, detail: String, fraction: Option<f64>) -> Job
 }
 
 /// The folders containing `items` (deduplicated, in order).
-fn parents(items: &[StoragePath]) -> Vec<StoragePath> {
+pub(crate) fn parents(items: &[StoragePath]) -> Vec<StoragePath> {
     let mut folders: Vec<StoragePath> = Vec::new();
     for parent in items.iter().filter_map(StoragePath::parent) {
         if !folders.contains(&parent) {
@@ -850,7 +904,8 @@ fn collect_items(operation: &Operation, items: &mut Vec<StoragePath>) {
             items.extend(tickets.iter().map(|t| t.original.clone()));
         }
         Operation::CreatedFolder(path) => items.push(path.clone()),
-        Operation::Deleted(paths) => items.extend(paths.iter().cloned()),
+        Operation::Deleted(paths) | Operation::Created(paths) => items.extend(paths.iter().cloned()),
+        Operation::PermissionsChanged(changes) => items.extend(changes.iter().map(|(path, _)| path.clone())),
         Operation::Sequence(parts) => parts.iter().for_each(|part| collect_items(part, items)),
     }
 }
@@ -911,7 +966,7 @@ fn interrupted_text(found: &[InterruptedTransfer]) -> String {
     }
 }
 
-fn decode_all(locations: &QStringList) -> Vec<StoragePath> {
+pub(crate) fn decode_all(locations: &QStringList) -> Vec<StoragePath> {
     QList::<QString>::from(locations).iter().filter_map(|text| StoragePath::decode(&text.to_string()).ok()).collect()
 }
 

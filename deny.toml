@@ -48,7 +48,14 @@ allow = [
     # rustls-platform-verifier). A permissive data license; the text ships in
     # the third-party license report.
     "CDLA-Permissive-2.0",
+    # libbzip2's own licence (bzip2 via libbz2-rs-sys): BSD-style, permissive.
+    "bzip2-1.0.6",
 ]
+
+# Not visible to cargo-deny: `unrar_sys` is MIT OR Apache-2.0 but vendors
+# RARLAB's unRAR source, whose freeware licence allows closed-source use and
+# forbids creating RAR archives (we only extract). about.toml declares it, so
+# its text ships in the license report (ADR 0027).
 
 [licenses.private]
 # Workspace crates are `publish = false` and proprietary.

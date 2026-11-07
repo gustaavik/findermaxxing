@@ -133,6 +133,7 @@ impl ProviderFactory for SftpService {
             .copier(fs.clone())
             .mover(fs.clone())
             .remover(fs.clone())
+            .permission_editor(fs.clone())
             .folder_maker(fs)
             .build())
     }

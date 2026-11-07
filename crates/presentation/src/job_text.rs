@@ -29,6 +29,29 @@ pub(crate) fn delete_title(items: &[StoragePath]) -> String {
     format!("Deleting {}", describe_items(items))
 }
 
+/// Titles of the utility jobs (M7a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UtilityJob {
+    Compress,
+    Extract,
+    ConvertImages,
+    CleanMetadata,
+    ChangePermissions,
+    SecureDelete,
+}
+
+pub(crate) fn utility_title(job: UtilityJob, items: &[StoragePath]) -> String {
+    let verb = match job {
+        UtilityJob::Compress => "Compressing",
+        UtilityJob::Extract => "Extracting",
+        UtilityJob::ConvertImages => "Converting",
+        UtilityJob::CleanMetadata => "Removing metadata from",
+        UtilityJob::ChangePermissions => "Changing permissions of",
+        UtilityJob::SecureDelete => "Securely deleting",
+    };
+    format!("{verb} {}", describe_items(items))
+}
+
 pub(crate) fn undo_title(kind: OperationKind) -> String {
     format!("Undoing {}", kind_label(kind))
 }
@@ -70,6 +93,11 @@ fn kind_label(kind: OperationKind) -> &'static str {
         OperationKind::Rename => "Rename",
         OperationKind::Trash => "Move to Trash",
         OperationKind::CreateFolder => "New Folder",
+        OperationKind::Compress => "Compress",
+        OperationKind::Extract => "Extract",
+        OperationKind::ConvertImages => "Convert Images",
+        OperationKind::CleanMetadata => "Remove Metadata",
+        OperationKind::ChangePermissions => "Change Permissions",
     }
 }
 

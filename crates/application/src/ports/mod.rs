@@ -20,6 +20,8 @@ mod saved_searches;
 mod semantic;
 mod servers;
 mod stream;
+mod terminal;
+mod utilities;
 mod watcher;
 
 pub use accounts::{
@@ -49,4 +51,12 @@ pub use semantic::{
 };
 pub use servers::{ConnectError, NewServerAccount, ServerAccountStore, ServerConnector};
 pub use stream::{ByteStream, DynReader, DynWriter, Reader, ResumeState, ResumedSink, WriteSink, Writer, skip_bytes};
+pub use terminal::{
+    CellPoint, CursorShape, KeyModifiers, ScreenChanged, StyledRun, TerminalColor, TerminalError, TerminalKey,
+    TerminalLauncher, TerminalScreen, TerminalSession, TerminalSize, TextStyle,
+};
+pub use utilities::{
+    ArchiveBuilder, ArchiveError, ArchiveEvent, ArchiveExtractor, ContentHasher, ImageConverter, ImageError,
+    ImageFingerprinter, ImageMetadata, PermissionEditor, RunningHash, SecureEraser, SkipReason, UtilityTools,
+};
 pub use watcher::{DynWatcher, Watcher};

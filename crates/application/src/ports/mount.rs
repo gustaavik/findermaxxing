@@ -5,7 +5,7 @@ use domain::{Capabilities, Capability, MountId, Scheme, VfsError};
 
 use super::{
     DynCopier, DynFolderMaker, DynLauncher, DynLister, DynMaterializer, DynMover, DynReader, DynRemover, DynTrasher,
-    DynWatcher, DynWriter, MetadataEditor, Presigner, VersionLister,
+    DynWatcher, DynWriter, MetadataEditor, PermissionEditor, Presigner, SecureEraser, VersionLister,
 };
 
 /// Declares the role slots of [`MountHandle`]: one optional `Arc<dyn Role>`
@@ -65,6 +65,8 @@ mount_roles! {
     metadata_editor: MetadataEditor => EditMetadata,
     presigner: Presigner => Presign,
     version_lister: VersionLister => ListVersions,
+    permission_editor: PermissionEditor => EditPermissions,
+    secure_eraser: SecureEraser => SecureErase,
 }
 
 impl MountHandle {

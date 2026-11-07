@@ -18,6 +18,29 @@ pub(crate) mod ffi {
         folder_text: String,
     }
 
+    /// Equally styled terminal cells; colours resolved to ARGB in Rust.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TerminalRun {
+        row: u16,
+        column: u16,
+        cells: u16,
+        text: String,
+        foreground: u32,
+        background: u32,
+        /// `TextStyle` bits (bold, italic, underline, dim, strikeout).
+        style: u8,
+    }
+
+    /// Where and how the terminal cursor is drawn.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TerminalCursor {
+        row: u16,
+        column: u16,
+        /// 0 block, 1 underline, 2 bar, 3 hidden.
+        shape: u8,
+        color: u32,
+    }
+
     /// One running job in the jobs panel.
     #[derive(Debug, Clone, PartialEq)]
     struct JobRow {
@@ -52,9 +75,10 @@ pub(crate) mod ffi {
 
     impl Vec<EntryRow> {}
     impl Vec<SidebarRow> {}
+    impl Vec<TerminalRun> {}
 }
 
-pub(crate) use ffi::{EntryRow, JobRow, SidebarRow};
+pub(crate) use ffi::{EntryRow, JobRow, SidebarRow, TerminalCursor, TerminalRun};
 
 // The C++ model checks bounds before calling these; out-of-range indices
 // are ignored rather than panicking across the FFI boundary. Signatures take

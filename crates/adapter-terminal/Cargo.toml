@@ -1,0 +1,20 @@
+[package]
+name = "adapter-terminal"
+description = "TerminalLauncher: the login shell on a pseudo-terminal , emulated by alacritty_terminal (its PTY and event loop)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+application.workspace = true
+domain.workspace = true
+alacritty_terminal.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

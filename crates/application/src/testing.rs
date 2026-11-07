@@ -16,6 +16,10 @@ use futures::future::{self, BoxFuture};
 use futures::stream::{self, Stream};
 use futures::{FutureExt, StreamExt};
 
+mod utilities;
+
+pub use utilities::{FakeArchiver, FakeHasher, FakeImageTools, FakeTerminalLauncher, fake_archive};
+
 use crate::cancel::CancelToken;
 use crate::ports::{
     AccountStore, ArchiveInspector, ArchiveItem, ArchiveListing, BucketInfo, ByteStream, CacheIndex, CacheRecord,
@@ -54,6 +58,8 @@ struct State {
     next_partial: u64,
     /// Offsets passed to `read_from`, for resume tests.
     read_offsets: Vec<u64>,
+    /// Files removed by secure erase, in order.
+    erased: Vec<StoragePath>,
 }
 
 /// How a fake mount presents itself to the application.
@@ -495,7 +501,12 @@ impl ProviderFactory for FakeFactory {
             .reader(fake.clone())
             .writer(fake.clone())
             .materializer(fake.clone());
-        Ok(if traits.remote { builder } else { builder.trasher(fake.clone()).launcher(fake) }.build())
+        Ok(if traits.remote {
+            builder
+        } else {
+            builder.trasher(fake.clone()).permission_editor(fake.clone()).secure_eraser(fake.clone()).launcher(fake)
+        }
+        .build())
     }
 }
 

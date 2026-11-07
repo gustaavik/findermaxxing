@@ -131,6 +131,11 @@ mod mutation {
     vfs_contract_tests::mutation_contract_tests!(fixture, #[ignore = "needs an SFTP server: see module docs"]);
 }
 
+mod permissions {
+    use super::fixture;
+    vfs_contract_tests::permission_contract_tests!(fixture, #[ignore = "needs an SFTP server: see module docs"]);
+}
+
 mod stream {
     use super::fixture;
     vfs_contract_tests::stream_contract_tests!(fixture, #[ignore = "needs an SFTP server: see module docs"]);

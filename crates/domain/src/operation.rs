@@ -4,6 +4,7 @@
 //! in turn the redo entry. Undo and redo are therefore the same mechanism.
 
 use crate::path::StoragePath;
+use crate::units::UnixMode;
 
 /// Where a trashed item went, so it can be put back exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,6 +27,13 @@ impl Relocation {
     }
 }
 
+/// One item's permissions before and after a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ModeChange {
+    pub before: UnixMode,
+    pub after: UnixMode,
+}
+
 /// A completed change, as recorded in the journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
@@ -35,6 +43,9 @@ pub enum Operation {
     Trashed(Vec<TrashTicket>),
     Restored(Vec<TrashTicket>),
     CreatedFolder(StoragePath),
+    /// New items made from others (archives, extracted folders, converted images).
+    Created(Vec<StoragePath>),
+    PermissionsChanged(Vec<(StoragePath, ModeChange)>),
     /// Permanently deleted while undoing on a location without a Trash.
     /// Irreversible: nothing to redo.
     Deleted(Vec<StoragePath>),
@@ -52,6 +63,11 @@ pub enum OperationKind {
     Rename,
     Trash,
     CreateFolder,
+    Compress,
+    Extract,
+    ConvertImages,
+    CleanMetadata,
+    ChangePermissions,
 }
 
 /// Something to execute that changes the filesystem without user prompts.
@@ -60,6 +76,7 @@ pub enum Action {
     Trash(Vec<StoragePath>),
     Restore(Vec<TrashTicket>),
     Move(Vec<Relocation>),
+    SetPermissions(Vec<(StoragePath, UnixMode)>),
     Sequence(Vec<Action>),
 }
 
@@ -73,6 +90,10 @@ impl Operation {
             Self::Trashed(tickets) => Action::Restore(tickets.clone()),
             Self::Restored(tickets) => Action::Trash(tickets.iter().map(|t| t.original.clone()).collect()),
             Self::CreatedFolder(path) => Action::Trash(vec![path.clone()]),
+            Self::Created(paths) => Action::Trash(paths.clone()),
+            Self::PermissionsChanged(changes) => Action::SetPermissions(
+                changes.iter().rev().map(|(path, change)| (path.clone(), change.before)).collect(),
+            ),
             Self::Deleted(_) => Action::Sequence(Vec::new()),
             Self::Sequence(parts) => Action::Sequence(parts.iter().rev().map(Self::inverse).collect()),
         }
@@ -84,7 +105,8 @@ impl Operation {
         match self {
             Self::Copied(items) | Self::Moved(items) => items.is_empty(),
             Self::Trashed(tickets) | Self::Restored(tickets) => tickets.is_empty(),
-            Self::Deleted(paths) => paths.is_empty(),
+            Self::Deleted(paths) | Self::Created(paths) => paths.is_empty(),
+            Self::PermissionsChanged(changes) => changes.is_empty(),
             Self::CreatedFolder(_) => false,
             Self::Sequence(parts) => parts.iter().all(Self::is_empty),
         }
@@ -137,6 +159,16 @@ mod tests {
     fn moves_are_reversed_in_reverse_order() {
         let op = Operation::Moved(vec![rel("/a", "/b"), rel("/c", "/d")]);
         assert_eq!(op.inverse(), Action::Move(vec![rel("/d", "/c"), rel("/b", "/a")]));
+    }
+
+    #[test]
+    fn created_items_are_trashed_and_modes_restored() {
+        assert_eq!(Operation::Created(vec![p("/a.zip")]).inverse(), Action::Trash(vec![p("/a.zip")]));
+        let change = ModeChange { before: UnixMode::from_mode(0o644), after: UnixMode::from_mode(0o600) };
+        assert_eq!(
+            Operation::PermissionsChanged(vec![(p("/a"), change)]).inverse(),
+            Action::SetPermissions(vec![(p("/a"), UnixMode::from_mode(0o644))])
+        );
     }
 
     #[test]

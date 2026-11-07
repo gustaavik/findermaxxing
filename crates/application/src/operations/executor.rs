@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use domain::{Action, ByteSize, Operation, Relocation, StoragePath, TrashTicket};
+use domain::{Action, ByteSize, ModeChange, Operation, Relocation, StoragePath, TrashTicket, UnixMode};
 
 use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
@@ -59,6 +59,7 @@ fn step_items(step: &Action) -> u64 {
         Action::Trash(paths) => paths.len(),
         Action::Restore(tickets) => tickets.len(),
         Action::Move(moves) => moves.len(),
+        Action::SetPermissions(modes) => modes.len(),
         Action::Sequence(parts) => parts.len(),
     };
     count as u64
@@ -77,6 +78,7 @@ async fn run_step(
         Action::Trash(paths) => trash_all(mounts, paths, no_trash, tracker, ctx).await,
         Action::Restore(tickets) => restore_all(mounts, tickets, tracker, ctx).await,
         Action::Move(moves) => move_all(mounts, moves, tracker, ctx).await,
+        Action::SetPermissions(modes) => set_permissions_all(mounts, modes, tracker, ctx).await,
         Action::Sequence(_) => (Operation::sequence(Vec::new()), Ok(())),
     }
 }
@@ -151,6 +153,41 @@ async fn restore_all(
         tracker.item_finished();
     }
     (Operation::Restored(restored), Ok(()))
+}
+
+pub(crate) async fn set_permissions_all(
+    mounts: &dyn MountResolver,
+    modes: &[(StoragePath, UnixMode)],
+    tracker: &ProgressTracker,
+    ctx: &JobContext,
+) -> StepOutcome {
+    let mut changed = Vec::with_capacity(modes.len());
+    for (path, mode) in modes {
+        if ctx.cancel.is_cancelled() {
+            return (Operation::PermissionsChanged(changed), Err(OperationError::Cancelled));
+        }
+        tracker.item_started(path.name());
+        match set_permissions(mounts, path, *mode).await {
+            Ok(change) => changed.push((path.clone(), change)),
+            Err(error) => return (Operation::PermissionsChanged(changed), Err(OperationError::on(path)(error))),
+        }
+        tracker.item_finished();
+    }
+    (Operation::PermissionsChanged(changed), Ok(()))
+}
+
+/// Sets `mode`, returning what it was before.
+async fn set_permissions(
+    mounts: &dyn MountResolver,
+    path: &StoragePath,
+    mode: UnixMode,
+) -> Result<ModeChange, domain::VfsError> {
+    let mount = mounts.resolve(path.mount())?;
+    let editor = mount.permission_editor()?;
+    let entry = mount.lister()?.stat_boxed(path).await?;
+    let before = entry.metadata().permissions.unwrap_or(mode);
+    editor.set_permissions(path, mode).await?;
+    Ok(ModeChange { before, after: mode })
 }
 
 async fn move_all(

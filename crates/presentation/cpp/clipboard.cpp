@@ -39,3 +39,9 @@ void setClipboardText(rust::Str text)
 {
     QGuiApplication::clipboard()->setText(QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size())));
 }
+
+rust::String clipboardText()
+{
+    const QByteArray text = QGuiApplication::clipboard()->text().toUtf8();
+    return rust::String(text.constData(), static_cast<std::size_t>(text.size()));
+}

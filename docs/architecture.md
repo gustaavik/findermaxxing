@@ -26,6 +26,10 @@ flowchart RL
     s3["adapter-s3<br/><i>Lister, Copier, Mover, Remover, FolderMaker,<br/>Reader, Writer, MetadataEditor,<br/>Presigner, VersionLister, S3Connector</i>"] --> application
     extract["adapter-content-extract<br/><i>ContentExtractor</i>"] --> application
     candle["adapter-candle-embeddings<br/><i>TextEmbedder, ImageEmbedder, ModelInstaller</i>"] --> application
+    checksums["adapter-checksums<br/><i>ContentHasher</i>"] --> application
+    archives["adapter-archives<br/><i>ArchiveExtractor, ArchiveBuilder</i>"] --> application
+    imaging["adapter-imaging<br/><i>ImageConverter, ImageFingerprinter, ImageMetadata</i>"] --> application
+    terminal["adapter-terminal<br/><i>TerminalLauncher</i>"] --> application
     keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
@@ -45,10 +49,14 @@ flowchart RL
     app --> onedrive
     app --> extract
     app --> candle
+    app --> checksums
+    app --> archives
+    app --> imaging
+    app --> terminal
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M6)
+## Ports and their implementations (M1–M7a)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -77,6 +85,12 @@ flowchart RL
 | `TextEmbedder`, `ImageEmbedder`, `ModelInstaller` | `adapter_candle_embeddings::{LocalTextEmbedder, LocalImageEmbedder, HuggingFaceInstaller}`, `testing::{FakeTextEmbedder, FakeImageEmbedder, FakeModelInstaller}` | installer unit test (resume, hash mismatch) against a local server; `tests/real_models.rs` (ignored, nightly): cross-lingual retrieval and text-to-photo |
 | `ContentExtractor` | `adapter_content_extract::LocalExtractor`, `testing::FakeExtractor` | `adapter-content-extract/tests/formats.rs` (Office, OpenDocument, EPUB, HTML, RTF, PDF, encodings) |
 | `IndexObserver` | `presentation::services::IndexStatusFeed`, `testing::RecordingIndexObserver` | `application/tests/semantic.rs` |
+| `ContentHasher` | `adapter_checksums::StandardHasher`, `testing::FakeHasher` | known-answer unit test; `application/tests/utilities.rs` |
+| `ArchiveExtractor`, `ArchiveBuilder` | `adapter_archives::LocalArchiver`, `testing::FakeArchiver` | `adapter-archives/tests/formats.rs` (round trip of every format with modes and times, zip-slip, RAR fixtures, encrypted RAR, system `7z`/`bsdtar` interop); `application/tests/utilities.rs` |
+| `ImageConverter`, `ImageFingerprinter`, `ImageMetadata` | `adapter_imaging::LocalImageTools`, `testing::FakeImageTools` | `adapter-imaging/tests/images.rs` (orientation, all formats, EXIF sensitivity, lossless stripping keeping ICC, look-alike distances) |
+| `PermissionEditor` | `LocalFs` (`chmod`), `SftpFs` (`setstat`), `FakeVfs` | `permission_contract_tests!` for all three (SFTP against OpenSSH in Docker) |
+| `SecureEraser` | `LocalFs`, `FakeVfs` | `adapter-local-fs/src/erase.rs` tests; `application/tests/utilities.rs` |
+| `TerminalLauncher`, `TerminalSession` | `adapter_terminal::AlacrittyLauncher`, `testing::FakeTerminalLauncher` | `adapter-terminal/tests/shell.rs` (real login shell: commands, colours, following only at the prompt, exit); key encoding unit tests |
 | `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |
 | `S3Connector` | `S3Service`, `testing::FakeS3Connector` | `across_providers.rs` (add/rollback, buckets by name, permission denied) |
 | `AccountStore`, `FavoritesStore` | `SqliteStore`, `testing::{InMemoryAccounts, InMemoryFavorites}` | `adapter-sqlite-store/tests/accounts_and_favorites.rs` |
@@ -122,6 +136,24 @@ flowchart RL
    ranks text and image hits above their floors and fuses them, and the folder view shows them as a search session
    sorted by relevance.
 4. File operations and *Look for Changes Now* send `rescan()`; otherwise the indexer looks again every 15 minutes.
+
+## Runtime flow: extracting an archive on any provider (M7a)
+
+1. *Tools → Extract Here*: `OperationsController.extract` starts a job (jobs panel, cancel, undo).
+2. `ExtractArchive` gets a local copy through `Materializer` (the file itself, or a cached download) and creates a
+   free folder (`photos`, `photos 2`, …) with `FolderMaker`.
+3. `LocalArchiver` reads the archive on the blocking pool and streams `Folder`/`File`/`Chunk`/`EndFile` events
+   through a bounded channel; each file goes to the destination's `Writer`.
+4. The job records `Operation::Created([folder])`; undo trashes it.
+
+## Runtime flow: the terminal (M7a)
+
+1. `>_` shows `TerminalPane`; `TerminalController.open` calls `OpenTerminal`, which starts a login shell in the
+   folder through `AlacrittyLauncher`.
+2. Output wakes the controller (one queued redraw per burst); it takes a `TerminalScreen`, resolves colours for the
+   theme, and pushes runs into the C++ `TerminalView`, which paints them.
+3. Keys, input-method text, the wheel and the mouse come back as signals → `TerminalSession`.
+4. Changing folders calls `follow`, which types a `cd` only while a shell leads the foreground process group.
 
 ## Dependency injection without globals
 `app` builds `AppServices` (use cases + runtime handle). `bootstrap.cpp` wraps them in a `ServicesHolder` QObject

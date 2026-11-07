@@ -18,6 +18,15 @@ pub enum OperationError {
     NothingToRedo,
     #[error("the app's settings couldn't be saved: {0}")]
     Store(String),
+    #[error("{0}")]
+    Archive(crate::ports::ArchiveError),
+    #[error("{0}")]
+    Image(crate::ports::ImageError),
+    /// Finished, but some archive entries were left out (links, unsafe paths).
+    #[error("{count} items in the archive were not extracted")]
+    SkippedEntries { count: usize },
+    #[error("{0:?} isn't something this can be done with")]
+    WrongKind(StoragePath),
 }
 
 impl OperationError {

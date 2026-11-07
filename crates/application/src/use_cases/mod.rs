@@ -18,6 +18,7 @@ mod servers;
 mod transfer_entries;
 mod trash_entries;
 mod undo_redo;
+mod utilities;
 mod watch_directory;
 
 pub use ai_search::{
@@ -50,4 +51,10 @@ pub use transfer_entries::{
 };
 pub use trash_entries::{DeletePermanently, TrashEntries};
 pub use undo_redo::{RedoOperation, UndoOperation};
+pub use utilities::{
+    ChangePermissions, CleanImageMetadata, CompressItems, CompressRequest, ComputeChecksums, ConvertImages,
+    ConvertRequest, DuplicateSearch, ExtractArchive, ExtractRequest, FindDuplicates, FindPublishedChecksum,
+    GetPermissions, MeasureDiskUsage, OpenTerminal, PermissionsView, ReadImageMetadata, SECURE_DELETE_PASSES,
+    SecureDelete, UsageProgress, local_folder,
+};
 pub use watch_directory::{ChangeBatch, CoalesceWindow, WatchDirectory};

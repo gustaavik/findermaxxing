@@ -39,8 +39,24 @@ FocusScope {
     readonly property int appearance: Qt.styleHints.colorScheme === Qt.ColorScheme.Dark
                                       ? PreviewController.Dark : PreviewController.Light
 
+    // Window-wide tools, opened by Main.
+    signal findDuplicatesRequested(string location, string label)
+    signal diskUsageRequested(string location)
+
     function selection() {
         return entries.selectedLocations()
+    }
+
+    // The selected folder, or the one being viewed.
+    function toolFolder() {
+        const row = list.currentIndex
+        const folder = entries.selectedCount === 1 && entries.isSelected(row) && entries.isContainerAt(row)
+        return folder ? { location: entries.locationAt(row), label: entries.nameAt(row) }
+                      : { location: controller.locationId, label: controller.title }
+    }
+
+    function selectedImages() {
+        return selection().filter(location => root.operations.isImage(location))
     }
 
     // Our own locations ride along with the file URLs, so a drop inside the
@@ -212,6 +228,33 @@ FocusScope {
     BulkRenameDialog {
         id: bulkRename
         services: root.services
+        operations: root.operations
+    }
+
+    CompressDialog {
+        id: compress
+        operations: root.operations
+    }
+
+    ChecksumDialog {
+        id: checksums
+        services: root.services
+    }
+
+    ImageToolsDialog {
+        id: imageTools
+        services: root.services
+        operations: root.operations
+    }
+
+    PermissionsDialog {
+        id: permissions
+        services: root.services
+        operations: root.operations
+    }
+
+    SecureDeleteDialog {
+        id: secureDelete
         operations: root.operations
     }
 
@@ -714,6 +757,53 @@ FocusScope {
             enabled: contextMenu.pasteAvailable
             onTriggered: root.operations.paste(controller.locationId, OperationsController.Move)
         }
+        Menu {
+            title: qsTr("Tools")
+            popupType: Popup.Native
+
+            MenuItem {
+                text: qsTr("Compress…")
+                enabled: contextMenu.hasSelection
+                onTriggered: compress.openFor(root.selection())
+            }
+            MenuItem {
+                text: qsTr("Extract Here")
+                enabled: contextMenu.singleSelection && root.operations.canExtract(root.entries.locationAt(list.currentIndex))
+                onTriggered: root.operations.extract(root.entries.locationAt(list.currentIndex))
+            }
+            MenuItem {
+                text: qsTr("Checksums…")
+                enabled: contextMenu.singleSelection && !root.entries.isContainerAt(list.currentIndex)
+                onTriggered: checksums.openFor(root.entries.locationAt(list.currentIndex))
+            }
+            MenuItem {
+                text: qsTr("Convert or Resize Images…")
+                enabled: contextMenu.hasSelection && root.selectedImages().length > 0
+                onTriggered: imageTools.openFor(root.selectedImages(), false)
+            }
+            MenuItem {
+                text: qsTr("Image Metadata…")
+                enabled: contextMenu.hasSelection && root.selectedImages().length > 0
+                onTriggered: imageTools.openFor(root.selectedImages(), true)
+            }
+            MenuItem {
+                text: qsTr("Permissions…")
+                enabled: contextMenu.hasSelection
+                onTriggered: permissions.openFor(root.selection())
+            }
+            MenuSeparator {}
+            MenuItem {
+                text: qsTr("Find Duplicates…")
+                onTriggered: {
+                    const folder = root.toolFolder()
+                    root.findDuplicatesRequested(folder.location, folder.label)
+                }
+            }
+            MenuItem {
+                text: qsTr("Disk Usage…")
+                onTriggered: root.diskUsageRequested(root.toolFolder().location)
+            }
+        }
         MenuSeparator {}
         MenuItem {
             text: qsTr("Move to Trash")
@@ -726,6 +816,13 @@ FocusScope {
             text: qsTr("Delete Immediately…")
             enabled: contextMenu.hasSelection
             onTriggered: root.confirmPermanentDelete()
+        }
+        MenuItem {
+            text: qsTr("Securely Delete…")
+            visible: !controller.remote
+            height: visible ? implicitHeight : 0
+            enabled: contextMenu.hasSelection
+            onTriggered: secureDelete.openFor(root.selection())
         }
         MenuSeparator {}
         MenuItem {

@@ -55,6 +55,35 @@ impl JobObserver for QtJobObserver {
     }
 }
 
+/// Progress of a job that has no jobs-panel row (duplicates, checksums):
+/// throttled like [`QtJobObserver`], then handed to `report` as the detail
+/// line and the bar fraction.
+pub(crate) struct ThrottledObserver<F> {
+    report: F,
+    last_sent: Mutex<Option<Instant>>,
+}
+
+impl<F: Fn(String, Option<f64>) + Send + Sync> ThrottledObserver<F> {
+    pub(crate) fn new(report: F) -> Self {
+        Self { report, last_sent: Mutex::new(None) }
+    }
+}
+
+impl<F: Fn(String, Option<f64>) + Send + Sync> JobObserver for ThrottledObserver<F> {
+    fn progress(&self, progress: &JobProgress) {
+        {
+            let mut last = self.last_sent.lock().unwrap_or_else(PoisonError::into_inner);
+            let complete = progress.fraction() == Some(1.0);
+            if !(complete || last.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let (detail, fraction) = progress_detail(progress);
+        (self.report)(detail, fraction);
+    }
+}
+
 pub(crate) struct QtConflictResolver {
     job_id: i32,
     thread: CxxQtThread<OperationsController>,

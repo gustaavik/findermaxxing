@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use application::CancelToken;
 use application::ports::{
-    ByteStream, Copier, FolderMaker, Lister, Mover, ProgressCallback, Reader, Remover, ResumeState, ResumedSink,
-    WriteSink, Writer,
+    ByteStream, Copier, FolderMaker, Lister, Mover, PermissionEditor, ProgressCallback, Reader, Remover, ResumeState,
+    ResumedSink, WriteSink, Writer,
 };
 use domain::{
     ByteSize, EntryBatch, EntryKind, EntryMetadata, FileEntry, LIST_BATCH_SIZE, PathError, PathSegment, StoragePath,
@@ -407,6 +407,17 @@ impl Mover for SftpFs {
         let parent = to.parent().ok_or(VfsError::NotFound)?;
         self.require_folder(&parent).await?;
         self.session.sftp.rename(self.remote(from)?, self.remote(to)?).await.map_err(|e| from_sftp(&e))
+    }
+}
+
+impl PermissionEditor for SftpFs {
+    fn set_permissions<'a>(&'a self, path: &'a StoragePath, mode: UnixMode) -> BoxFuture<'a, Result<(), VfsError>> {
+        async move {
+            let mut attributes = Metadata::empty();
+            attributes.permissions = Some(mode.bits());
+            self.session.sftp.set_metadata(self.remote(path)?, attributes).await.map_err(|e| from_sftp(&e))
+        }
+        .boxed()
     }
 }
 

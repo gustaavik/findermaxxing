@@ -51,6 +51,8 @@ impl ProviderFactory for LocalFsFactory {
             .materializer(fs.clone())
             .reader(fs.clone())
             .writer(fs.clone())
+            .permission_editor(fs.clone())
+            .secure_eraser(fs.clone())
             .trasher(self.trash.clone())
             .build())
     }

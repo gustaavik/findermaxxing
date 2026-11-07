@@ -13,7 +13,10 @@ mod ffi {
 
         #[cxx_name = "setClipboardText"]
         fn set_clipboard_text(text: &str);
+
+        #[cxx_name = "clipboardText"]
+        fn clipboard_text() -> String;
     }
 }
 
-pub(crate) use ffi::{clipboard_urls, set_clipboard_text, set_clipboard_urls};
+pub(crate) use ffi::{clipboard_text, clipboard_urls, set_clipboard_text, set_clipboard_urls};

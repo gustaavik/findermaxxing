@@ -25,6 +25,13 @@ ApplicationWindow {
         tabBar.currentIndex = tabs.count - 1
     }
 
+    function toggleTerminal() {
+        terminal.visible = !terminal.visible
+        if (terminal.visible) {
+            terminal.start()
+        }
+    }
+
     function closeTab(index) {
         if (tabs.count === 1) {
             window.close()
@@ -111,6 +118,15 @@ ApplicationWindow {
                 Accessible.name: qsTr("AI search: %1").arg(aiSearch.enabled ? aiSearch.statusText : qsTr("off"))
             }
             ToolButton {
+                text: ">_"
+                checkable: true
+                checked: terminal.visible
+                onClicked: window.toggleTerminal()
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Terminal")
+                Accessible.name: qsTr("Show or hide the terminal")
+            }
+            ToolButton {
                 text: "+"
                 onClicked: window.newTab()
                 ToolTip.visible: hovered
@@ -136,19 +152,36 @@ ApplicationWindow {
         SplitView.fillWidth: true
         spacing: 0
 
-        StackLayout {
+        SplitView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: tabBar.currentIndex
+            orientation: Qt.Vertical
 
-            Repeater {
-                id: views
-                model: tabs
-                delegate: FolderView {
-                    services: window.services
-                    operations: fileOps
-                    sidebar: sidebarController
+            StackLayout {
+                SplitView.fillHeight: true
+                currentIndex: tabBar.currentIndex
+
+                Repeater {
+                    id: views
+                    model: tabs
+                    delegate: FolderView {
+                        services: window.services
+                        operations: fileOps
+                        sidebar: sidebarController
+                        onFindDuplicatesRequested: (location, label) => duplicates.openFor(location, label)
+                        onDiskUsageRequested: location => diskUsage.openFor(location)
+                    }
                 }
+            }
+
+            TerminalPane {
+                id: terminal
+                visible: false
+                SplitView.preferredHeight: 240
+                SplitView.minimumHeight: 80
+                services: window.services
+                folder: window.currentView ? window.currentView.controller.locationId : ""
+                onCloseRequested: visible = false
             }
         }
 
@@ -187,6 +220,18 @@ ApplicationWindow {
     }
 
     CostDialog {
+        operations: fileOps
+    }
+
+    DuplicatesWindow {
+        id: duplicates
+        services: window.services
+        operations: fileOps
+    }
+
+    DiskUsageWindow {
+        id: diskUsage
+        services: window.services
         operations: fileOps
     }
 
@@ -247,6 +292,12 @@ ApplicationWindow {
         onActivated: fileOps.redo()
     }
 
+    Shortcut {
+        // Ctrl+` as in VS Code; Qt calls macOS's ⌃ key "Meta".
+        sequence: Qt.platform.os === "osx" ? "Meta+`" : "Ctrl+`"
+        context: Qt.ApplicationShortcut
+        onActivated: window.toggleTerminal()
+    }
     Shortcut {
         sequences: [StandardKey.AddTab]
         onActivated: window.newTab()

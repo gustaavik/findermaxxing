@@ -4,6 +4,16 @@ use crate::path::PathSegment;
 
 /// First number used when a name is taken: `report.pdf` becomes `report 2.pdf`.
 pub const FIRST_DUPLICATE_NUMBER: u32 = 2;
+/// Extensions of two parts, kept together: `logs.tar.gz` → `logs 2.tar.gz`.
+const COMPOUND_EXTENSIONS: &[&[u8]] = &[b".tar.gz", b".tar.bz2", b".tar.xz", b".tar.zst"];
+
+/// Splits off a compound extension (case-insensitively), if there is one.
+fn compound_split(name: &[u8]) -> Option<(&[u8], &[u8])> {
+    COMPOUND_EXTENSIONS.iter().find_map(|extension| {
+        let split = name.len().checked_sub(extension.len()).filter(|at| *at > 0)?;
+        name[split..].eq_ignore_ascii_case(extension).then(|| (&name[..split], &name[split + 1..]))
+    })
+}
 
 /// Finder/GNOME-style name for "keep both": inserts ` <n>` before the
 /// extension of files; folders keep dots in their names (`v1.2 3`).
@@ -11,8 +21,11 @@ pub const FIRST_DUPLICATE_NUMBER: u32 = 2;
 /// # Errors
 /// Never in practice; the inputs are already valid segments.
 pub fn numbered_name(original: &PathSegment, kind: EntryKind, number: u32) -> Result<PathSegment, PathError> {
-    let (stem, extension) =
-        if kind.is_container() { (original.as_bytes(), None) } else { original.stem_and_extension() };
+    let (stem, extension) = if kind.is_container() {
+        (original.as_bytes(), None)
+    } else {
+        compound_split(original.as_bytes()).map_or_else(|| original.stem_and_extension(), |(s, e)| (s, Some(e)))
+    };
     let mut name = stem.to_vec();
     name.extend_from_slice(format!(" {number}").as_bytes());
     if let Some(extension) = extension {
@@ -54,6 +67,8 @@ mod tests {
         assert_eq!(numbered_name(&name("report.pdf"), EntryKind::File, 2).unwrap(), name("report 2.pdf"));
         assert_eq!(numbered_name(&name("README"), EntryKind::File, 3).unwrap(), name("README 3"));
         assert_eq!(numbered_name(&name(".env"), EntryKind::File, 2).unwrap(), name(".env 2"));
+        assert_eq!(numbered_name(&name("logs.TAR.GZ"), EntryKind::File, 2).unwrap(), name("logs 2.TAR.GZ"));
+        assert_eq!(numbered_name(&name(".tar.gz"), EntryKind::File, 2).unwrap(), name(".tar 2.gz"));
     }
 
     #[test]

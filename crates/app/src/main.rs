@@ -4,6 +4,7 @@
 
 mod drives;
 mod indexing;
+mod utilities;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -101,6 +102,9 @@ fn start() -> Result<i32, StartupError> {
     };
     let ai = indexing::start(&handle, &mounts, &store, &home_dir())?;
     let accounts = AccountServices { store, credentials, connector: Arc::new(providers.s3.clone()) };
+    let operations =
+        FileOperations::new(&mounts, Arc::new(LocalOpener::new(handle.clone())), CostPolicy::default(), &journal);
+    let utilities = utilities::build(&handle, &mounts, &operations, home_dir());
     let services = AppServices {
         list_directory: Arc::new(ListDirectory::new(mounts.clone())),
         watch_directory: Arc::new(WatchDirectory::new(mounts.clone(), Arc::new(TokioClock), CoalesceWindow::default())),
@@ -111,12 +115,8 @@ fn start() -> Result<i32, StartupError> {
             Arc::new(LocalArchiveInspector::new(handle.clone())),
         )),
         saved_searches: SavedSearches::new(&saved),
-        operations: FileOperations::new(
-            &mounts,
-            Arc::new(LocalOpener::new(handle.clone())),
-            CostPolicy::default(),
-            &journal,
-        ),
+        operations,
+        utilities,
         places: Places::new(&favorites, Arc::new(LocalVolumes::new(handle.clone()))),
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),

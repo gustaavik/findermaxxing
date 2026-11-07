@@ -2,25 +2,77 @@ use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 const QML_MODULE_URI: &str = "FinderMaxxing";
 
+/// Every QML file of the module.
+const QML_FILES: &[&str] = &[
+    "qml/Main.qml",
+    "qml/FolderView.qml",
+    "qml/FileIcon.qml",
+    "qml/JobsPanel.qml",
+    "qml/ConflictDialog.qml",
+    "qml/PreviewPane.qml",
+    "qml/BulkRenameDialog.qml",
+    "qml/SearchBar.qml",
+    "qml/Sidebar.qml",
+    "qml/AddAccountDialog.qml",
+    "qml/ConnectServerDialog.qml",
+    "qml/AiSearchDialog.qml",
+    "qml/CostDialog.qml",
+    "qml/InfoDialog.qml",
+    "qml/ChecksumDialog.qml",
+    "qml/DuplicatesWindow.qml",
+    "qml/DiskUsageWindow.qml",
+    "qml/ImageToolsDialog.qml",
+    "qml/PermissionsDialog.qml",
+    "qml/CompressDialog.qml",
+    "qml/SecureDeleteDialog.qml",
+    "qml/TerminalPane.qml",
+];
+
+/// Rust files with `#[cxx::bridge]` or `#[cxx_qt::bridge]` modules.
+const BRIDGE_FILES: &[&str] = &[
+    "src/rows_bridge.rs",
+    "src/services_bridge.rs",
+    "src/clipboard_bridge.rs",
+    "src/input_bridge.rs",
+    "src/clock_bridge.rs",
+    "src/folder_view_controller.rs",
+    "src/operations_controller.rs",
+    "src/preview_controller.rs",
+    "src/quick_look_bridge.rs",
+    "src/bulk_rename_controller.rs",
+    "src/sidebar_controller.rs",
+    "src/item_details_controller.rs",
+    "src/ai_search_controller.rs",
+    "src/checksum_controller.rs",
+    "src/duplicates_controller.rs",
+    "src/disk_usage_controller.rs",
+    "src/image_metadata_controller.rs",
+    "src/permissions_controller.rs",
+    "src/terminal_controller.rs",
+];
+
+/// C++ shims; headers with `Q_OBJECT` are listed so they get moc'd.
+const CPP_FILES: &[&str] = &[
+    "cpp/entry_list_model.h",
+    "cpp/entry_list_model.cpp",
+    "cpp/services_holder.h",
+    "cpp/services_holder.cpp",
+    "cpp/job_list_model.h",
+    "cpp/job_list_model.cpp",
+    "cpp/clipboard.cpp",
+    "cpp/input.cpp",
+    "cpp/clock.cpp",
+    "cpp/sidebar_model.h",
+    "cpp/sidebar_model.cpp",
+    "cpp/terminal_view.h",
+    "cpp/terminal_view.cpp",
+    "cpp/bootstrap.cpp",
+];
+
 fn main() {
     macos_sdk_shims::provide_missing_frameworks();
 
-    let module = QmlModule::new(QML_MODULE_URI).qml_files([
-        "qml/Main.qml",
-        "qml/FolderView.qml",
-        "qml/FileIcon.qml",
-        "qml/JobsPanel.qml",
-        "qml/ConflictDialog.qml",
-        "qml/PreviewPane.qml",
-        "qml/BulkRenameDialog.qml",
-        "qml/SearchBar.qml",
-        "qml/Sidebar.qml",
-        "qml/AddAccountDialog.qml",
-        "qml/ConnectServerDialog.qml",
-        "qml/AiSearchDialog.qml",
-        "qml/CostDialog.qml",
-        "qml/InfoDialog.qml",
-    ]);
+    let module = QmlModule::new(QML_MODULE_URI).qml_files(QML_FILES.iter().copied());
 
     // SAFETY: only adds a language-standard flag; no other cc settings are touched.
     let builder = unsafe {
@@ -32,36 +84,8 @@ fn main() {
     builder
         .qt_module("Gui")
         .qt_module("Quick")
-        .files([
-            "src/rows_bridge.rs",
-            "src/services_bridge.rs",
-            "src/clipboard_bridge.rs",
-            "src/input_bridge.rs",
-            "src/clock_bridge.rs",
-            "src/folder_view_controller.rs",
-            "src/operations_controller.rs",
-            "src/preview_controller.rs",
-            "src/quick_look_bridge.rs",
-            "src/bulk_rename_controller.rs",
-            "src/sidebar_controller.rs",
-            "src/item_details_controller.rs",
-            "src/ai_search_controller.rs",
-        ])
-        .cpp_files([
-            "cpp/entry_list_model.h",
-            "cpp/entry_list_model.cpp",
-            "cpp/services_holder.h",
-            "cpp/services_holder.cpp",
-            "cpp/job_list_model.h",
-            "cpp/job_list_model.cpp",
-            "cpp/clipboard.cpp",
-            "cpp/input.cpp",
-            "cpp/clock.cpp",
-            "cpp/sidebar_model.h",
-            "cpp/sidebar_model.cpp",
-            "cpp/bootstrap.cpp",
-            quick_look_source(),
-        ])
+        .files(BRIDGE_FILES.iter().copied())
+        .cpp_files(CPP_FILES.iter().copied().chain([quick_look_source()]))
         .build();
 }
 

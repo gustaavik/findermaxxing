@@ -1,5 +1,5 @@
 use application::operations::OperationError;
-use application::ports::{ConnectError, SignInError};
+use application::ports::{ArchiveError, ConnectError, ImageError, SignInError};
 use application::use_cases::{DriveError, ServerError};
 use domain::{PathSegment, StoragePath, VfsError};
 
@@ -36,8 +36,29 @@ pub(crate) fn operation_message(error: &OperationError) -> Option<String> {
         OperationError::NothingToUndo => "There is nothing to undo.".to_owned(),
         OperationError::NothingToRedo => "There is nothing to redo.".to_owned(),
         OperationError::Store(problem) => format!("The app's settings couldn't be saved ({problem})."),
+        OperationError::Archive(error) => archive_problem(error),
+        OperationError::Image(ImageError::Unsupported) => "This image format can't be read.".to_owned(),
+        OperationError::Image(error) => format!("The image couldn't be processed ({error})."),
+        OperationError::SkippedEntries { count } => format!(
+            "{count} item{} in the archive {} not extracted: links, special files and paths that would leave the \
+             folder are skipped.",
+            if *count == 1 { "" } else { "s" },
+            if *count == 1 { "was" } else { "were" }
+        ),
+        OperationError::WrongKind(item) => format!("{} can't be used for this.", quoted(item)),
     };
     Some(text)
+}
+
+fn archive_problem(error: &ArchiveError) -> String {
+    match error {
+        ArchiveError::Encrypted => {
+            "The archive is password-protected; protected archives can't be opened yet.".to_owned()
+        }
+        ArchiveError::Corrupt(..) => "The archive is damaged or isn't the kind its name says.".to_owned(),
+        ArchiveError::CannotCreate(_) => "RAR archives can be extracted, not created.".to_owned(),
+        ArchiveError::Io(error) => format!("The archive couldn't be read ({error})."),
+    }
 }
 
 /// Why a server account couldn't be added or connected.

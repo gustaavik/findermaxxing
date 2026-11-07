@@ -1,28 +1,35 @@
 //! Innermost layer of FinderMaxxing. Everything here is pure data and rules;
 //! nothing performs IO or knows which runtime, UI toolkit or provider is in use.
 
+mod archive;
 mod bulk_rename;
 mod cache;
 mod capability;
 mod category;
 mod change;
+mod checksum;
 mod conflict;
 mod cost;
+mod disk_usage;
 mod drive;
+mod duplicates;
 mod entry;
 mod error;
+mod imaging;
 mod indexing;
 mod job;
 mod naming;
 mod natural_query;
 mod operation;
 mod path;
+mod permissions;
 mod remote;
 mod search;
 mod server;
 mod sorting;
 mod units;
 
+pub use archive::{ArchiveFormat, CREATABLE_FORMATS, UnsafeEntry, archive_name, entry_path, extraction_folder_name};
 pub use bulk_rename::{
     AddPosition, BulkRename, CaseChange, CaseSensitivity, Matching, NamePart, PlannedRename, RenameOutcome,
     RenameProblem, RuleError,
@@ -31,13 +38,23 @@ pub use cache::{CachePolicy, CachedCopy, DEFAULT_CACHE_LIMIT, Retention};
 pub use capability::{Capabilities, Capability};
 pub use category::FileCategory;
 pub use change::ChangeEvent;
+pub use checksum::{Digest, HashAlgorithm, Verification, digest_in_list, verify};
 pub use conflict::{Conflict, ConflictChoice, ConflictMemory, ConflictResolution, ConflictScope};
 pub use cost::{CostDecision, CostPolicy, CostReason, CostWarning, DEFAULT_LARGE_TRANSFER, TransferEstimate};
+pub use disk_usage::{LARGEST_FILES_SHOWN, UsageKind, UsageNode};
 pub use drive::{
     DROPBOX_SCHEME, DriveAccount, DriveLocation, DriveProvider, GOOGLE_DRIVE_SCHEME, ONEDRIVE_SCHEME, disambiguate,
 };
+pub use duplicates::{
+    DEFAULT_MIN_DUPLICATE_SIZE, DuplicateGroup, DuplicateMatch, ImageFingerprint, PARTIAL_HASH_BYTES,
+    SIMILAR_IMAGE_DISTANCE, keeper_first, same_size_groups, similar_groups, sort_groups, split_by,
+};
 pub use entry::{EntryBatch, EntryKind, EntryMetadata, FileEntry, LIST_BATCH_SIZE, SymlinkTarget, Visibility};
 pub use error::{PathError, VfsError};
+pub use imaging::{
+    ConversionRequest, DEFAULT_JPEG_QUALITY, ImageFormat, MetadataField, Resize, Sensitivity, converted_name,
+    sensitivity_of,
+};
 pub use indexing::{
     ContentKind, Fingerprint, IndexDecision, IndexScope, IndexStatus, MAX_PASSAGES, category_matches, index_decision,
     passages, relevance,
@@ -45,8 +62,12 @@ pub use indexing::{
 pub use job::{JobPhase, JobProgress};
 pub use naming::{FIRST_DUPLICATE_NUMBER, first_free_name, numbered_name};
 pub use natural_query::{DateRange, ParsedQuery, QueryClock, parse_query};
-pub use operation::{Action, Operation, OperationKind, Relocation, TrashTicket};
+pub use operation::{Action, ModeChange, Operation, OperationKind, Relocation, TrashTicket};
 pub use path::{MountId, PathSegment, Scheme, StoragePath};
+pub use permissions::{
+    Access, BitChange, PermissionClass, PermissionEdit, PermissionReach, common_bits, octal, parse_octal,
+    permission_bit, symbolic,
+};
 pub use remote::{AccountId, Addressing, BucketName, S3_SCHEME, S3Account, S3Auth, S3Location};
 pub use search::{HiddenItems, ModifiedWithin, SavedSearch, SavedSearchId, SearchMatcher, SearchQuery, SizeClass};
 pub use server::{

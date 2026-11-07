@@ -16,6 +16,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 cxx.workspace = true
 cxx-qt.workspace = true
 cxx-qt-lib.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 cxx-qt-build.workspace = true

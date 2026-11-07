@@ -6,6 +6,7 @@ use application::ports::{
     VolumeLister,
 };
 use application::ports::{IndexObserver, ModelInstaller};
+use application::ports::{TerminalLauncher, UtilityTools};
 use application::use_cases::{
     AccountServices, AddBucket, AddFavorite, AddS3Account, BulkRenameEntries, ConnectSavedAccounts, CopyEntries,
     CreateFolder, CreateShareLink, DeletePermanently, DeleteSavedSearch, GetItemProperties, ListBuckets, ListDirectory,
@@ -21,6 +22,11 @@ use application::use_cases::{
 use application::use_cases::{
     AiSearchServices, ChangeIndexScope, DisableAiSearch, EnableAiSearch, GetAiSettings, IndexerControl, PauseIndexing,
     SemanticSearch,
+};
+use application::use_cases::{
+    ChangePermissions, CleanImageMetadata, CompressItems, ComputeChecksums, ConvertImages, ExtractArchive,
+    FindDuplicates, FindPublishedChecksum, GetPermissions, MeasureDiskUsage, OpenTerminal, ReadImageMetadata,
+    SecureDelete,
 };
 use domain::{CostPolicy, StoragePath};
 use tokio::runtime::Handle;
@@ -45,6 +51,7 @@ pub struct AppServices {
     pub ai: AiSearch,
     pub offline: Offline,
     pub item_details: ItemDetails,
+    pub utilities: Utilities,
     /// Runs every background task of the UI (sessions, jobs, previews).
     pub runtime: Handle,
     /// Where new windows open; bare paths typed by the user resolve on its mount.
@@ -54,6 +61,57 @@ pub struct AppServices {
 impl std::fmt::Debug for AppServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppServices").field("home", &self.home).finish_non_exhaustive()
+    }
+}
+
+/// The M7a utilities. The ones that change files share the window's undo
+/// history with the file operations.
+#[derive(Debug, Clone)]
+pub struct Utilities {
+    pub checksums: Arc<ComputeChecksums>,
+    pub published_checksum: Arc<FindPublishedChecksum>,
+    pub duplicates: Arc<FindDuplicates>,
+    pub disk_usage: Arc<MeasureDiskUsage>,
+    pub compress: Arc<CompressItems>,
+    pub extract: Arc<ExtractArchive>,
+    pub convert_images: Arc<ConvertImages>,
+    pub read_metadata: Arc<ReadImageMetadata>,
+    pub clean_metadata: Arc<CleanImageMetadata>,
+    pub get_permissions: Arc<GetPermissions>,
+    pub change_permissions: Arc<ChangePermissions>,
+    pub secure_delete: Arc<SecureDelete>,
+    pub terminal: Arc<OpenTerminal>,
+}
+
+impl Utilities {
+    #[must_use]
+    pub fn new(
+        mounts: &Arc<dyn MountResolver>,
+        operations: &FileOperations,
+        tools: &UtilityTools,
+        terminal: Arc<dyn TerminalLauncher>,
+        home: std::path::PathBuf,
+    ) -> Self {
+        let history = &operations.history;
+        Self {
+            checksums: Arc::new(ComputeChecksums::new(mounts.clone(), tools.hasher.clone())),
+            published_checksum: Arc::new(FindPublishedChecksum::new(mounts.clone())),
+            duplicates: Arc::new(FindDuplicates::new(
+                mounts.clone(),
+                tools.hasher.clone(),
+                tools.fingerprinter.clone(),
+            )),
+            disk_usage: Arc::new(MeasureDiskUsage::new(mounts.clone())),
+            compress: Arc::new(CompressItems::new(mounts.clone(), history.clone(), tools.builder.clone())),
+            extract: Arc::new(ExtractArchive::new(mounts.clone(), history.clone(), tools.extractor.clone())),
+            convert_images: Arc::new(ConvertImages::new(mounts.clone(), history.clone(), tools.converter.clone())),
+            read_metadata: Arc::new(ReadImageMetadata::new(mounts.clone(), tools.metadata.clone())),
+            clean_metadata: Arc::new(CleanImageMetadata::new(mounts.clone(), history.clone(), tools.metadata.clone())),
+            get_permissions: Arc::new(GetPermissions::new(mounts.clone())),
+            change_permissions: Arc::new(ChangePermissions::new(mounts.clone(), history.clone())),
+            secure_delete: Arc::new(SecureDelete::new(mounts.clone())),
+            terminal: Arc::new(OpenTerminal::new(terminal, home)),
+        }
     }
 }
 
@@ -334,6 +392,27 @@ impl ItemDetails {
     }
 }
 
+/// Utilities over fakes: a toy hash, toy archives and images, an echo terminal.
+#[cfg(test)]
+fn fake_utilities(
+    fake: &application::testing::FakeVfs,
+    mounts: &Arc<dyn MountResolver>,
+    operations: &FileOperations,
+) -> Utilities {
+    use application::testing::{FakeArchiver, FakeHasher, FakeImageTools, FakeTerminalLauncher};
+    let archiver = Arc::new(FakeArchiver::new(fake.clone()));
+    let images = Arc::new(FakeImageTools::new(fake.clone()));
+    let tools = UtilityTools {
+        hasher: Arc::new(FakeHasher),
+        extractor: archiver.clone(),
+        builder: archiver,
+        converter: images.clone(),
+        fingerprinter: images.clone(),
+        metadata: images,
+    };
+    Utilities::new(mounts, operations, &tools, Arc::new(FakeTerminalLauncher::default()), "/".into())
+}
+
 /// AI search over fakes: a bag-of-words model and an in-memory index.
 #[cfg(test)]
 fn fake_ai_search(fake: &application::testing::FakeVfs, mounts: &Arc<dyn MountResolver>) -> AiSearch {
@@ -401,6 +480,9 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
     };
     let journal: Arc<dyn TransferJournal> = Arc::new(InMemoryJournal::default());
     let pins: Arc<dyn PinStore> = Arc::new(InMemoryPins::default());
+    let operations =
+        FileOperations::new(&mounts, Arc::new(RecordingOpener::default()), CostPolicy::default(), &journal);
+    let utilities = fake_utilities(fake, &mounts, &operations);
     AppServices {
         list_directory: Arc::new(ListDirectory::new(mounts.clone())),
         watch_directory: Arc::new(WatchDirectory::new(
@@ -415,7 +497,8 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
             Arc::new(StubArchiveInspector),
         )),
         saved_searches: SavedSearches::new(&saved),
-        operations: FileOperations::new(&mounts, Arc::new(RecordingOpener::default()), CostPolicy::default(), &journal),
+        operations,
+        utilities,
         places: Places::new(&favorites, Arc::new(FixedVolumes::default())),
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),
