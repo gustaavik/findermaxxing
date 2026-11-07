@@ -3,10 +3,11 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 5** (5a and 5b).
+**Status: milestone 6.**
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
+- M6: AI search: find files by what they say or show, in your own words and many languages ("strømregning fra marts", "photos of the cats"). Local models on candle, downloaded once after you agree; nothing leaves the machine.
 - M5b: Google Drive, Dropbox and OneDrive, signed in through the browser (OAuth + PKCE), with Google Docs exported to Office formats. Needs OAuth client IDs: [docs/oauth-setup.md](docs/oauth-setup.md).
 - M5a: SFTP, WebDAV and SMB servers; iCloud Drive and other synced cloud folders under Locations; a size-limited cache with *Keep Available Offline*; transfers that resume after a quit or crash; drag and drop with other apps.
 - M4: S3 and S3-compatible storage (AWS, R2, B2, Wasabi, MinIO, SeaweedFS) in a unified sidebar with places and favorites. Copy and move stream between providers, transfers that may cost money ask first, and secrets live in the OS keychain.
@@ -169,6 +170,37 @@ FM_DEV_CLOUD_MOCK=http://127.0.0.1:<port> cargo run -p app    # debug build
 
 With real accounts: register the apps and build with the IDs as described in [docs/oauth-setup.md](docs/oauth-setup.md), then *Sign In with Browser…* opens the provider's own page. Run each adapter's `live_round_trip` test too.
 
+## Manually testing M6
+
+Use a release build: the models are slow in debug.
+
+```sh
+mkdir -p /tmp/fm-ai && cd /tmp/fm-ai
+printf 'Faktura for el, marts. Beløb 1200 kr.' > faktura-marts.txt
+printf 'Recipe: lasagne with tomato and basil' > opskrift.md
+printf 'Q3 minutes: the budget for next quarter was approved' > q3-minutes.txt
+# add a photo or two (cats.jpg, a room …)
+cargo run -p app --release
+```
+
+- ✦ in the toolbar opens *AI Search*.
+  - It shows the download (487.7 MB, from huggingface.co) before anything is fetched.
+  - Remove the default folders (✕ on each) and add `/tmp/fm-ai` with *Add Folder…* if you don't want your real folders indexed while testing.
+  - Then *Download and Turn On*. The status reaches "Up to date · 3 items indexed".
+- In a folder, switch the search field to **Contents (AI)** and try these searches:
+
+  | Query | Expected |
+  |---|---|
+  | `strømregning` | `faktura-marts.txt` |
+  | `pasta recipe` | `opskrift.md` |
+  | `kvartalsbudget` | `q3-minutes.txt` first |
+  | `documents from this week` | all three, newest first |
+
+- *Search photos by what they show* asks again (1.15 GB). After indexing, `to katte` finds the cat photo.
+- *Pause* stops indexing, and searching keeps working.
+- *Turn Off…* → *Also delete the index and the downloaded models* removes everything from disk.
+- Real-model check: `FM_MODELS_DIR=/somewhere cargo test --release -p adapter-candle-embeddings --test real_models -- --ignored --nocapture`.
+
 ## Layout
 
 ```
@@ -188,8 +220,11 @@ crates/
   adapter-onedrive/       onedrive:// provider (Microsoft Graph): pre-authorised upload sessions, async copies
   infra-oauth/            shared by the drive adapters: OAuth 2.0 + PKCE loopback sign-in, token refresh, ApiClient
   mock-cloud/             test doubles of the three APIs and an OAuth server (tests and mock-cloud-server only)
+  adapter-content-extract/ text from documents for the index: PDF, Office/OpenDocument, EPUB, HTML, RTF, plain text
+  adapter-candle-embeddings/ local embedding models on candle (e5, CLIP), verified downloads from pinned revisions
   adapter-smb/            smb:// provider (pure-Rust smb2): Windows and NAS shares, resumable writes
-  adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal
+  adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal,
+                          content index (int8 vectors) and AI settings
   adapter-tokio-runtime/  Clock on tokio
   presentation/           cxx-qt controllers (folder view, operations, preview, bulk rename, sidebar, item info), C++ models,
                           clipboard, keyboard and Quick Look shims, QML

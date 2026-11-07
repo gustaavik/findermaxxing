@@ -14,7 +14,7 @@ flowchart RL
     local["adapter-local-fs<br/><i>Lister, Watcher, Copier, Mover,<br/>Remover, FolderMaker, Trasher, Launcher,<br/>Reader, Writer, VolumeLister, LocalFileOpener</i>"] --> application
     tokio_rt["adapter-tokio-runtime<br/><i>Clock</i>"] --> application
     preview["adapter-preview<br/><i>TextRenderer, ArchiveInspector</i>"] --> application
-    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore, ServerAccountStore,<br/>FavoritesStore, PinStore, CacheIndex, TransferJournal</i>"] --> application
+    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore, ServerAccountStore,<br/>FavoritesStore, PinStore, CacheIndex, TransferJournal,<br/>SemanticIndex, AiSettingsStore</i>"] --> application
     cache["adapter-file-cache<br/><i>CachingResolver (MountResolver decorator),<br/>Materializer, Lister, CacheJanitor</i>"] --> application
     sftp["adapter-sftp<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
     webdav["adapter-webdav<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
@@ -24,6 +24,8 @@ flowchart RL
     dropbox["adapter-dropbox<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, DriveConnector</i>"] --> oauth
     onedrive["adapter-onedrive<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, DriveConnector</i>"] --> oauth
     s3["adapter-s3<br/><i>Lister, Copier, Mover, Remover, FolderMaker,<br/>Reader, Writer, MetadataEditor,<br/>Presigner, VersionLister, S3Connector</i>"] --> application
+    extract["adapter-content-extract<br/><i>ContentExtractor</i>"] --> application
+    candle["adapter-candle-embeddings<br/><i>TextEmbedder, ImageEmbedder, ModelInstaller</i>"] --> application
     keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
@@ -41,10 +43,12 @@ flowchart RL
     app --> gdrive
     app --> dropbox
     app --> onedrive
+    app --> extract
+    app --> candle
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M5b)
+## Ports and their implementations (M1–M6)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -69,6 +73,10 @@ flowchart RL
 | `DriveConnector`, `DriveAccountStore`, `UrlOpener` | the three drive services; `SqliteStore`; `LocalOpener`; `testing::{FakeDriveConnector, InMemoryDrives}` | sign-in cases in each contract file; `application/tests/drives.rs`; `servers_cache_journal.rs` |
 | `TransferJournal` | `SqliteStore`, `testing::InMemoryJournal` | `servers_cache_journal.rs` (survives reopen); `resume_servers_offline.rs` |
 | `CacheIndex`, `PinStore`, `CacheJanitor` | `SqliteStore`, `adapter_file_cache::FileCache`; `testing::{InMemoryCacheIndex, InMemoryPins, RecordingJanitor}` | `adapter-file-cache/tests/cache.rs` (freshness, LRU eviction with pins, offline browsing, forgetting an account); `domain::cache` unit tests |
+| `SemanticIndex`, `AiSettingsStore` | `SqliteStore` (int8 vectors searched in memory), `testing::{InMemorySemanticIndex, InMemoryAiSettings}` | `servers_cache_journal.rs` (survives reopen, model spaces kept apart, filters like the fake); `application/tests/semantic.rs` |
+| `TextEmbedder`, `ImageEmbedder`, `ModelInstaller` | `adapter_candle_embeddings::{LocalTextEmbedder, LocalImageEmbedder, HuggingFaceInstaller}`, `testing::{FakeTextEmbedder, FakeImageEmbedder, FakeModelInstaller}` | installer unit test (resume, hash mismatch) against a local server; `tests/real_models.rs` (ignored, nightly): cross-lingual retrieval and text-to-photo |
+| `ContentExtractor` | `adapter_content_extract::LocalExtractor`, `testing::FakeExtractor` | `adapter-content-extract/tests/formats.rs` (Office, OpenDocument, EPUB, HTML, RTF, PDF, encodings) |
+| `IndexObserver` | `presentation::services::IndexStatusFeed`, `testing::RecordingIndexObserver` | `application/tests/semantic.rs` |
 | `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |
 | `S3Connector` | `S3Service`, `testing::FakeS3Connector` | `across_providers.rs` (add/rollback, buckets by name, permission denied) |
 | `AccountStore`, `FavoritesStore` | `SqliteStore`, `testing::{InMemoryAccounts, InMemoryFavorites}` | `adapter-sqlite-store/tests/accounts_and_favorites.rs` |
@@ -103,6 +111,17 @@ flowchart RL
 2. The app quits mid-upload: the job future is dropped, the checkpointed sink keeps its partial data, and the journal row stays.
 3. At the next start `checkInterrupted` finds the row and the window offers Resume or Discard.
 4. `ResumeTransfer` reruns the job in "earlier run" mode: finished files are kept, existing folders are merged into, and the in-flight file continues at `Writer::resume`'s offset with `Reader::read_from`.
+
+## Runtime flow: AI search (M6)
+
+1. ✦ → *Turn On*: `EnableAiSearch` installs the text pack (verified download, f16 prep), saves the settings and
+   tells the indexer through `IndexerControl`.
+2. The indexer walks the scope, extracts text (`ContentExtractor`), embeds passages (`TextEmbedder`) and writes them
+   to the `SemanticIndex`. It reports progress through `IndexStatusFeed` to `AiSearchController`.
+3. A search in *Contents (AI)* mode: `parse_query` splits off dates and kinds, `SemanticSearch` embeds the rest,
+   ranks text and image hits above their floors and fuses them, and the folder view shows them as a search session
+   sorted by relevance.
+4. File operations and *Look for Changes Now* send `rescan()`; otherwise the indexer looks again every 15 minutes.
 
 ## Dependency injection without globals
 `app` builds `AppServices` (use cases + runtime handle). `bootstrap.cpp` wraps them in a `ServicesHolder` QObject

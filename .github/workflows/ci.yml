@@ -87,3 +87,14 @@ jobs:
       - name: 100k-file listing benchmark
         if: github.event_name == 'schedule'
         run: cargo test --release -p adapter-local-fs --test local_fs -- --ignored large_dir --nocapture
+      - name: Cache embedding models
+        if: github.event_name == 'schedule'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/fm-models
+          key: models-${{ runner.os }}-${{ hashFiles('crates/adapter-candle-embeddings/src/manifest.rs') }}
+      - name: Real embedding models (cross-lingual text, text-to-photo)
+        if: github.event_name == 'schedule'
+        run: cargo test --release -p adapter-candle-embeddings --test real_models -- --ignored --nocapture
+        env:
+          FM_MODELS_DIR: ${{ runner.temp }}/fm-models
