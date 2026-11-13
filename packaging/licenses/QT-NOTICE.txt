@@ -1,0 +1,23 @@
+FinderMaxxing uses the Qt framework (https://www.qt.io), version 6.8, under the
+GNU Lesser General Public License version 3 (LGPL-3.0, in this folder together
+with the GPL-3.0 it builds on).
+
+Qt is linked dynamically and ships unmodified, as separate libraries:
+  - macOS: FinderMaxxing.app/Contents/Frameworks/Qt*.framework and Contents/PlugIns
+  - AppImage: usr/lib/libQt6*.so.6 and usr/plugins inside the image
+  - Flatpak: provided by the KDE runtime (org.kde.Platform)
+
+Qt Multimedia's FFmpeg libraries (libavcodec, libavformat, libavutil,
+libswresample, libswscale) are likewise LGPL (version 2.1 or later) and are
+shipped unmodified beside Qt.
+
+You may replace these libraries with your own build of the same Qt version.
+On macOS the app is signed with library validation disabled so a replaced
+library still loads; re-sign ad hoc after modifying the bundle
+(codesign --force --deep --sign - FinderMaxxing.app).
+
+The source code of this Qt version is available at
+https://download.qt.io/official_releases/qt/6.8/6.8.3/.
+
+Other third-party components and their licenses are listed in
+third-party-licenses.html; Sparkle's license is in Sparkle-LICENSE.txt.

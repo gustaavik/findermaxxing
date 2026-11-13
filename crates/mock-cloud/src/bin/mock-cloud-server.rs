@@ -5,11 +5,14 @@
 //! FM_DEV_CLOUD_MOCK=http://127.0.0.1:<port> cargo run -p app
 //! ```
 //!
-//! Each drive starts with a few sample items.
+//! Each drive starts with a few sample items. The Keygen double knows one
+//! Pro license, `DEMO-PRO-KEY` (two computers); point a debug build at it with
+//! the `FM_KEYGEN_*` lines it prints.
 
 #![allow(clippy::print_stdout, reason = "a developer tool")]
 
 use mock_cloud::MockCloud;
+use mock_cloud::keygen::{MockLicense, public_key_hex};
 
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 
@@ -24,8 +27,17 @@ async fn main() {
         state.google.add("root", "notes.txt", false, b"second".to_vec(), "text/plain");
         state.dropbox.add("root", "Readme.md", false, b"# Dropbox".to_vec(), "text/markdown");
         state.onedrive.add("root", "Documents", true, Vec::new(), FOLDER_MIME);
+        state.keygen.licenses.push(MockLicense {
+            id: "demo-license".into(),
+            key: "DEMO-PRO-KEY".into(),
+            name: "Demo Pro".into(),
+            status: "ACTIVE".into(),
+            max_machines: 2,
+            machines: Vec::new(),
+        });
     }
     cloud.add_google_doc("root", "Budget", "spreadsheet");
     println!("FM_DEV_CLOUD_MOCK={}", cloud.base());
+    println!("FM_KEYGEN_URL={}/keygen FM_KEYGEN_ACCOUNT=demo FM_KEYGEN_PUBLIC_KEY={}", cloud.base(), public_key_hex());
     std::future::pending::<()>().await;
 }

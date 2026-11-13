@@ -19,6 +19,7 @@ mod error;
 mod imaging;
 mod indexing;
 mod job;
+mod licensing;
 mod naming;
 mod natural_query;
 mod operation;
@@ -65,6 +66,7 @@ pub use indexing::{
     passages, relevance,
 };
 pub use job::{JobPhase, JobProgress};
+pub use licensing::{Activation, LicenseStatus, ProFeature, RENEW_BEFORE_DAYS, license_status, should_renew};
 pub use naming::{FIRST_DUPLICATE_NUMBER, first_free_name, numbered_name};
 pub use natural_query::{DateRange, ParsedQuery, QueryClock, parse_query};
 pub use operation::{Action, ModeChange, Operation, OperationKind, Relocation, TrashTicket};

@@ -25,6 +25,12 @@ use application::ports::{
     TerminalSession, TerminalSize,
 };
 
+/// Set inside every Flatpak sandbox.
+const FLATPAK_VARIABLE: &str = "FLATPAK_ID";
+const FLATPAK_SPAWN: &str = "flatpak-spawn";
+/// Starts the account's login shell, as Terminal apps on the host do.
+const HOST_LOGIN_SHELL: &str = r#"exec "$(getent passwd "$(id -un)" | cut -d: -f7)" -l"#;
+
 /// Lines kept above the screen.
 const SCROLLBACK_LINES: usize = 10_000;
 /// Nominal cell size reported to programs that ask for pixels.
@@ -93,6 +99,23 @@ fn window_size(size: TerminalSize) -> WindowSize {
     }
 }
 
+/// Inside a Flatpak sandbox the sandbox's own `sh` is useless: run the
+/// user's login shell on the host instead (needs `--talk-name=org.freedesktop.Flatpak`).
+fn flatpak_host_shell(folder: &Path) -> Option<tty::Shell> {
+    std::env::var_os(FLATPAK_VARIABLE)?;
+    let args = [
+        "--host".to_owned(),
+        "--watch-bus".to_owned(),
+        format!("--directory={}", folder.display()),
+        format!("--env=TERM={TERM_NAME}"),
+        format!("--env=COLORTERM={COLOR_TERM}"),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        HOST_LOGIN_SHELL.to_owned(),
+    ];
+    Some(tty::Shell::new(FLATPAK_SPAWN.to_owned(), args.to_vec()))
+}
+
 impl TerminalLauncher for AlacrittyLauncher {
     fn open(
         &self,
@@ -102,7 +125,7 @@ impl TerminalLauncher for AlacrittyLauncher {
     ) -> Result<Arc<dyn TerminalSession>, TerminalError> {
         let spawn_failed = |e: &dyn std::fmt::Display| TerminalError::Spawn(e.to_string());
         let options = tty::Options {
-            shell: None,
+            shell: flatpak_host_shell(&folder),
             working_directory: Some(folder),
             drain_on_exit: false,
             env: [("TERM".to_owned(), TERM_NAME.to_owned()), ("COLORTERM".to_owned(), COLOR_TERM.to_owned())]

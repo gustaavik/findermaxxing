@@ -4,6 +4,7 @@ mod create_folder;
 mod drives;
 mod indexer;
 mod item_details;
+mod licensing;
 mod list_directory;
 mod offline;
 mod open_entry;
@@ -33,6 +34,7 @@ pub use indexer::{Indexer, IndexerControl, IndexerParts, PassOutcome, RESCAN_INT
 pub use item_details::{
     CreateShareLink, GetItemProperties, ListItemVersions, MAX_SHARE_LINK_VALIDITY, UpdateItemProperties,
 };
+pub use licensing::{ActivateLicense, CurrentLicense, DeactivateLicense, LicenseServices, RenewLicense};
 pub use list_directory::{HiddenFiles, ListDirectory, ListRequest};
 pub use offline::{ForgetLocalCopies, GetOfflineStatus, MakeAvailableOffline, OfflineStatus, RemoveOfflineCopy};
 pub use open_entry::OpenEntry;

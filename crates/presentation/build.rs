@@ -28,6 +28,8 @@ const QML_FILES: &[&str] = &[
     "qml/TerminalPane.qml",
     "qml/OrganizeWindow.qml",
     "qml/CloudModelDialog.qml",
+    "qml/LicenseDialog.qml",
+    "qml/ProDialog.qml",
 ];
 
 /// Rust files with `#[cxx::bridge]` or `#[cxx_qt::bridge]` modules.
@@ -53,6 +55,9 @@ const BRIDGE_FILES: &[&str] = &[
     "src/terminal_controller.rs",
     "src/organize_controller.rs",
     "src/cloud_model_controller.rs",
+    "src/license_controller.rs",
+    "src/updater_bridge.rs",
+    "src/updater_controller.rs",
 ];
 
 /// C++ shims; headers with `Q_OBJECT` are listed so they get moc'd.
@@ -89,8 +94,18 @@ fn main() {
         .qt_module("Gui")
         .qt_module("Quick")
         .files(BRIDGE_FILES.iter().copied())
-        .cpp_files(CPP_FILES.iter().copied().chain([quick_look_source()]))
+        .cpp_files(CPP_FILES.iter().copied().chain([quick_look_source(), updater_source()]))
         .build();
+}
+
+/// Sparkle exists only on macOS; it is loaded at run time, never linked.
+fn updater_source() -> &'static str {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo::rustc-link-lib=framework=Foundation");
+        "cpp/updater_mac.mm"
+    } else {
+        "cpp/updater_other.cpp"
+    }
 }
 
 /// Quick Look exists only on macOS; elsewhere a stub answers "unavailable".

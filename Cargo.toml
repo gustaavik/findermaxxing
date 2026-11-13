@@ -12,6 +12,7 @@ default-members = [
     "crates/adapter-imaging",
     "crates/adapter-terminal",
     "crates/adapter-cloud-models",
+    "crates/adapter-keygen",
     "crates/adapter-dropbox",
     "crates/adapter-file-cache",
     "crates/adapter-gdrive",
@@ -41,6 +42,7 @@ members = [
     "crates/adapter-imaging",
     "crates/adapter-terminal",
     "crates/adapter-cloud-models",
+    "crates/adapter-keygen",
     "crates/adapter-dropbox",
     "crates/adapter-file-cache",
     "crates/adapter-gdrive",
@@ -94,6 +96,7 @@ adapter-archives = { path = "crates/adapter-archives" }
 adapter-imaging = { path = "crates/adapter-imaging" }
 adapter-terminal = { path = "crates/adapter-terminal" }
 adapter-cloud-models = { path = "crates/adapter-cloud-models" }
+adapter-keygen = { path = "crates/adapter-keygen" }
 mock-cloud = { path = "crates/mock-cloud" }
 presentation = { path = "crates/presentation" }
 
@@ -152,7 +155,7 @@ md-5 = "0.11"
 sha1 = "0.11"
 blake3 = "1.8"
 bzip2 = "0.6"
-liblzma = "0.4"
+liblzma = { version = "0.4", features = ["static"] }
 zstd = "0.14"
 sevenz-rust2 = "0.25"
 # RARLAB's unRAR source (freeware licence: extraction only, closed source allowed; ADR 0027).
@@ -162,6 +165,7 @@ kamadak-exif = "0.6"
 img-parts = "0.4"
 alacritty_terminal = "0.26"
 xattr = "1.7"
+ed25519-dalek = "3.0"
 # Finder tags are a binary property list in an extended attribute.
 plist = { version = "1.10", default-features = false }
 cxx = "1.0.205"

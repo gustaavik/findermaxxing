@@ -61,6 +61,8 @@ impl CredentialKey {
     const DRIVE_SERVICE: &'static str = "FinderMaxxing Drives";
     const CLOUD_MODEL_SERVICE: &'static str = "FinderMaxxing Cloud Model";
     const CLOUD_MODEL_ACCOUNT: &'static str = "api-key";
+    const LICENSE_SERVICE: &'static str = "FinderMaxxing License";
+    const LICENSE_ACCOUNT: &'static str = "license-key";
 
     #[must_use]
     pub fn s3_secret(id: AccountId) -> Self {
@@ -77,6 +79,12 @@ impl CredentialKey {
     #[must_use]
     pub fn cloud_model_key() -> Self {
         Self { service: Self::CLOUD_MODEL_SERVICE.to_owned(), account: Self::CLOUD_MODEL_ACCOUNT.to_owned() }
+    }
+
+    /// The Pro license key of this machine.
+    #[must_use]
+    pub fn license_key() -> Self {
+        Self { service: Self::LICENSE_SERVICE.to_owned(), account: Self::LICENSE_ACCOUNT.to_owned() }
     }
 
     /// The password or key passphrase of a file-server account.

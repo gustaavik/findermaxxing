@@ -26,6 +26,9 @@ ApplicationWindow {
     }
 
     function toggleTerminal() {
+        if (!terminal.visible && !requirePro("utilities")) {
+            return
+        }
         terminal.visible = !terminal.visible
         if (terminal.visible) {
             terminal.start()
@@ -58,6 +61,25 @@ ApplicationWindow {
     SidebarController {
         id: sidebarController
         services: window.services
+    }
+
+    LicenseController {
+        id: license
+        services: window.services
+        onUpgradeRequested: feature => proDialog.openFor(feature)
+        Component.onCompleted: refresh()
+    }
+
+    // Renews the signed license file while the app runs (offline: a no-op).
+    Timer {
+        interval: 6 * 60 * 60 * 1000
+        running: true
+        repeat: true
+        onTriggered: license.refresh()
+    }
+
+    function requirePro(feature) {
+        return license.require(feature)
     }
 
     AiSearchController {
@@ -112,7 +134,7 @@ ApplicationWindow {
             }
             ToolButton {
                 text: aiSearch.working ? "✦ " + Math.round(Math.max(0, aiSearch.progress) * 100) + "%" : "✦"
-                onClicked: aiDialog.open()
+                onClicked: if (window.requirePro("ai-search")) aiDialog.open()
                 ToolTip.visible: hovered
                 ToolTip.text: aiSearch.enabled ? aiSearch.statusText : qsTr("AI search is off")
                 Accessible.name: qsTr("AI search: %1").arg(aiSearch.enabled ? aiSearch.statusText : qsTr("off"))
@@ -125,6 +147,13 @@ ApplicationWindow {
                 ToolTip.visible: hovered
                 ToolTip.text: qsTr("Terminal")
                 Accessible.name: qsTr("Show or hide the terminal")
+            }
+            ToolButton {
+                text: license.pro ? qsTr("Pro") : qsTr("Free")
+                onClicked: licenseDialog.open()
+                ToolTip.visible: hovered
+                ToolTip.text: license.statusText
+                Accessible.name: qsTr("License: %1").arg(license.edition)
             }
             ToolButton {
                 text: "+"
@@ -145,7 +174,12 @@ ApplicationWindow {
         SplitView.minimumWidth: 140
         controller: sidebarController
         operations: fileOps
-        onOpenRequested: location => window.currentView.controller.openLocationId(location)
+        requirePro: feature => window.requirePro(feature)
+        onOpenRequested: location => {
+            if (location.startsWith("file:") || window.requirePro("remote-storage")) {
+                window.currentView.controller.openLocationId(location)
+            }
+        }
     }
 
     ColumnLayout {
@@ -168,6 +202,7 @@ ApplicationWindow {
                         services: window.services
                         operations: fileOps
                         sidebar: sidebarController
+                        requirePro: feature => window.requirePro(feature)
                         onFindDuplicatesRequested: (location, label) => duplicates.openFor(location, label)
                         onDiskUsageRequested: location => diskUsage.openFor(location)
                         onOrganizeRequested: location => organizeWindow.openFor(location)
@@ -222,6 +257,23 @@ ApplicationWindow {
 
     CostDialog {
         operations: fileOps
+    }
+
+    UpdaterController {
+        id: updater
+        Component.onCompleted: start()
+    }
+
+    LicenseDialog {
+        id: licenseDialog
+        license: license
+        updater: updater
+    }
+
+    ProDialog {
+        id: proDialog
+        license: license
+        onEnterKeyRequested: licenseDialog.open()
     }
 
     DuplicatesWindow {

@@ -14,6 +14,7 @@ use application::use_cases::{
     PreparePreview, RedoOperation, RemoveFavorite, RemoveS3Account, RenameEntry, SaveSearch, SearchFiles,
     SetCostWarnings, TrashEntries, UndoOperation, UpdateItemProperties, WatchDirectory,
 };
+use application::use_cases::{ActivateLicense, CurrentLicense, DeactivateLicense, LicenseServices, RenewLicense};
 use application::use_cases::{AddDrive, ConnectDrive, DriveServices, ListDrives, RemoveDrive};
 use application::use_cases::{
     AddServer, ConnectServer, DiscardTransfer, ForgetLocalCopies, GetOfflineStatus, ListInterruptedTransfers,
@@ -54,6 +55,7 @@ pub struct AppServices {
     pub item_details: ItemDetails,
     pub utilities: Utilities,
     pub organize: Organize,
+    pub licensing: Licensing,
     /// Runs every background task of the UI (sessions, jobs, previews).
     pub runtime: Handle,
     /// Where new windows open; bare paths typed by the user resolve on its mount.
@@ -113,6 +115,35 @@ impl Utilities {
             change_permissions: Arc::new(ChangePermissions::new(mounts.clone(), history.clone())),
             secure_delete: Arc::new(SecureDelete::new(mounts.clone())),
             terminal: Arc::new(OpenTerminal::new(terminal, home)),
+        }
+    }
+}
+
+/// The Pro license (ADR 0030). `None` in builds without a Keygen account,
+/// where debug builds unlock Pro and release builds stay free.
+#[derive(Debug, Clone)]
+pub struct Licensing {
+    pub use_cases: Option<LicenseUseCases>,
+    /// Where "Buy Pro" leads.
+    pub store_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LicenseUseCases {
+    pub current: Arc<CurrentLicense>,
+    pub activate: Arc<ActivateLicense>,
+    pub renew: Arc<RenewLicense>,
+    pub deactivate: Arc<DeactivateLicense>,
+}
+
+impl LicenseUseCases {
+    #[must_use]
+    pub fn new(services: &LicenseServices) -> Self {
+        Self {
+            current: Arc::new(CurrentLicense::new(services.clone())),
+            activate: Arc::new(ActivateLicense::new(services.clone())),
+            renew: Arc::new(RenewLicense::new(services.clone())),
+            deactivate: Arc::new(DeactivateLicense::new(services.clone())),
         }
     }
 }
@@ -500,6 +531,12 @@ fn fake_ai_search(fake: &application::testing::FakeVfs, mounts: &Arc<dyn MountRe
     AiSearch::new(&ai_services, search, Arc::new(IndexStatusFeed::default()))
 }
 
+#[cfg(test)]
+fn fake_preview(mounts: &Arc<dyn MountResolver>) -> Arc<PreparePreview> {
+    use application::testing::{StubArchiveInspector, StubTextRenderer};
+    Arc::new(PreparePreview::new(mounts.clone(), Arc::new(StubTextRenderer), Arc::new(StubArchiveInspector)))
+}
+
 /// `AppServices` over in-memory fakes, for presentation tests.
 #[cfg(test)]
 pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices {
@@ -507,7 +544,6 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
     use application::testing::{
         FakeS3Connector, FakeServerConnector, FixedVolumes, InMemoryAccounts, InMemoryFavorites, InMemoryJournal,
         InMemoryKeychain, InMemoryPins, InMemorySavedSearches, InMemoryServers, InstantClock, RecordingOpener,
-        StubArchiveInspector, StubTextRenderer,
     };
     use application::use_cases::CoalesceWindow;
 
@@ -544,13 +580,10 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
             CoalesceWindow::default(),
         )),
         search: Arc::new(SearchFiles::new(mounts.clone())),
-        preview: Arc::new(PreparePreview::new(
-            mounts.clone(),
-            Arc::new(StubTextRenderer),
-            Arc::new(StubArchiveInspector),
-        )),
+        preview: fake_preview(&mounts),
         saved_searches: SavedSearches::new(&saved),
         organize: fake_organize(fake, &mounts, &operations, &utilities),
+        licensing: Licensing { use_cases: None, store_url: String::new() },
         operations,
         utilities,
         places: Places::new(&favorites, Arc::new(FixedVolumes::default())),

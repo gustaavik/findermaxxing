@@ -43,6 +43,8 @@ FocusScope {
     signal findDuplicatesRequested(string location, string label)
     signal diskUsageRequested(string location)
     signal organizeRequested(string location)
+    // Asks for Pro before a Pro feature; the window supplies it.
+    property var requirePro: feature => true
 
     function selection() {
         return entries.selectedLocations()
@@ -105,6 +107,9 @@ FocusScope {
 
     function runSearch() {
         if (searchBar.contents) {
+            if (!root.requirePro("ai-search")) {
+                return
+            }
             controller.searchContent(searchField.text)
         } else {
             controller.search(searchField.text, searchBar.kind, searchBar.date, searchBar.size)
@@ -765,48 +770,50 @@ FocusScope {
             MenuItem {
                 text: qsTr("Compress…")
                 enabled: contextMenu.hasSelection
-                onTriggered: compress.openFor(root.selection())
+                onTriggered: if (root.requirePro("utilities")) compress.openFor(root.selection())
             }
             MenuItem {
                 text: qsTr("Extract Here")
                 enabled: contextMenu.singleSelection && root.operations.canExtract(root.entries.locationAt(list.currentIndex))
-                onTriggered: root.operations.extract(root.entries.locationAt(list.currentIndex))
+                onTriggered: if (root.requirePro("utilities")) root.operations.extract(root.entries.locationAt(list.currentIndex))
             }
             MenuItem {
                 text: qsTr("Checksums…")
                 enabled: contextMenu.singleSelection && !root.entries.isContainerAt(list.currentIndex)
-                onTriggered: checksums.openFor(root.entries.locationAt(list.currentIndex))
+                onTriggered: if (root.requirePro("utilities")) checksums.openFor(root.entries.locationAt(list.currentIndex))
             }
             MenuItem {
                 text: qsTr("Convert or Resize Images…")
                 enabled: contextMenu.hasSelection && root.selectedImages().length > 0
-                onTriggered: imageTools.openFor(root.selectedImages(), false)
+                onTriggered: if (root.requirePro("utilities")) imageTools.openFor(root.selectedImages(), false)
             }
             MenuItem {
                 text: qsTr("Image Metadata…")
                 enabled: contextMenu.hasSelection && root.selectedImages().length > 0
-                onTriggered: imageTools.openFor(root.selectedImages(), true)
+                onTriggered: if (root.requirePro("utilities")) imageTools.openFor(root.selectedImages(), true)
             }
             MenuItem {
                 text: qsTr("Permissions…")
                 enabled: contextMenu.hasSelection
-                onTriggered: permissions.openFor(root.selection())
+                onTriggered: if (root.requirePro("utilities")) permissions.openFor(root.selection())
             }
             MenuSeparator {}
             MenuItem {
                 text: qsTr("Find Duplicates…")
                 onTriggered: {
-                    const folder = root.toolFolder()
-                    root.findDuplicatesRequested(folder.location, folder.label)
+                    if (root.requirePro("utilities")) {
+                        const folder = root.toolFolder()
+                        root.findDuplicatesRequested(folder.location, folder.label)
+                    }
                 }
             }
             MenuItem {
                 text: qsTr("Organize…")
-                onTriggered: root.organizeRequested(root.toolFolder().location)
+                onTriggered: if (root.requirePro("organize")) root.organizeRequested(root.toolFolder().location)
             }
             MenuItem {
                 text: qsTr("Disk Usage…")
-                onTriggered: root.diskUsageRequested(root.toolFolder().location)
+                onTriggered: if (root.requirePro("utilities")) root.diskUsageRequested(root.toolFolder().location)
             }
         }
         MenuSeparator {}
@@ -827,7 +834,7 @@ FocusScope {
             visible: !controller.remote
             height: visible ? implicitHeight : 0
             enabled: contextMenu.hasSelection
-            onTriggered: secureDelete.openFor(root.selection())
+            onTriggered: if (root.requirePro("utilities")) secureDelete.openFor(root.selection())
         }
         MenuSeparator {}
         MenuItem {

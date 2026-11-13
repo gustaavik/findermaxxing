@@ -10,6 +10,7 @@ mod clock;
 mod drives;
 mod job;
 mod journal;
+mod licensing;
 mod lister;
 mod mount;
 mod mutation;
@@ -33,6 +34,7 @@ pub use clock::Clock;
 pub use drives::{DriveAccountStore, DriveConnector, NewDriveAccount, SignInError, SignedIn, UrlOpener};
 pub use job::{ConflictResolver, CostConfirmer, JobObserver};
 pub use journal::{InFlightWrite, InterruptedTransfer, JournalEntry, JournalId, JournaledKind, TransferJournal};
+pub use licensing::{LicenseError, LicenseServer, LicenseStore, MachineFile, MachineFileReader, MachineIdentity};
 pub use lister::{DynLister, Lister};
 pub use mount::{MountHandle, MountHandleBuilder, MountResolver, ProviderFactory};
 pub use mutation::{

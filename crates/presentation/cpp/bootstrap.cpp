@@ -12,6 +12,8 @@
 namespace {
 
 constexpr auto kApplicationName = "FinderMaxxing";
+// Matches the .desktop file (and the Flatpak id), so Wayland shows the icon.
+constexpr auto kDesktopFileName = "dev.findermaxxing.FinderMaxxing";
 constexpr auto kQmlModule = "FinderMaxxing";
 constexpr auto kMainComponent = "Main";
 constexpr auto kServicesProperty = "services";
@@ -29,6 +31,7 @@ std::int32_t runApplication(rust::Box<AppServices> services)
     QGuiApplication application(argc, argv);
     QGuiApplication::setApplicationName(kApplicationName);
     QGuiApplication::setApplicationDisplayName(kApplicationName);
+    QGuiApplication::setDesktopFileName(kDesktopFileName);
 
     // Declared before the engine so it is destroyed after every QML object.
     ServicesHolder holder(std::move(services));

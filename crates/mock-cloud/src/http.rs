@@ -113,6 +113,10 @@ pub async fn handle(
 }
 
 fn route(state: &mut State, request: &Request) -> Reply {
+    if let Some(rest) = request.path.strip_prefix("/keygen/v1/accounts/") {
+        let rest = rest.to_owned();
+        return crate::keygen::handle(state, &rest, request);
+    }
     if request.path.ends_with("/v1/messages") || request.path.ends_with("/chat/completions") {
         return crate::models::handle(state, request);
     }

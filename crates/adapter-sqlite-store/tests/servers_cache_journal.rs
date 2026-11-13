@@ -263,6 +263,19 @@ async fn cloud_model_settings_survive_a_restart_and_clear() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_machine_file_survives_a_restart_and_clears() {
+    use application::ports::{LicenseStore, MachineFile};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let file = MachineFile("-----BEGIN MACHINE FILE-----\nabc\n-----END MACHINE FILE-----\n".into());
+    assert_eq!(LicenseStore::load(&reopen(&path)).await.unwrap(), None);
+    LicenseStore::save(&reopen(&path), file.clone()).await.unwrap();
+    assert_eq!(LicenseStore::load(&reopen(&path)).await.unwrap(), Some(file));
+    LicenseStore::clear(&reopen(&path)).await.unwrap();
+    assert_eq!(LicenseStore::load(&reopen(&path)).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ai_settings_survive_a_restart() {
     use application::ports::{AiSettings, AiSettingsStore};
     let dir = tempfile::tempdir().unwrap();

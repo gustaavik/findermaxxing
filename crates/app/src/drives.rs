@@ -24,7 +24,7 @@ const MOCK_VARIABLE: &str = "FM_DEV_CLOUD_MOCK";
 const MOCK_CLIENT_ID: &str = "dev-mock";
 
 /// A compiled-in setting; in debug builds the environment may override it.
-fn client_setting(compiled: Option<&'static str>, variable: &str) -> Option<String> {
+pub(crate) fn client_setting(compiled: Option<&'static str>, variable: &str) -> Option<String> {
     let runtime = cfg!(debug_assertions).then(|| std::env::var(variable).ok()).flatten();
     runtime.or_else(|| compiled.map(str::to_owned)).filter(|value| !value.trim().is_empty())
 }

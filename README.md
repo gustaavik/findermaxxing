@@ -3,7 +3,8 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 7** (7a and 7b).
+**Status: milestone 8.**
+- M8: release packaging (signed, notarized universal DMG; AppImage; Flatpak), Free and Pro editions licensed through Keygen with offline activation, and updates (Sparkle on macOS, AppImageUpdate, Flatpak).
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
@@ -267,6 +268,57 @@ cargo run -p app --release
   - *Allow for This Folder*, then *Analyze Again*: the suggestions now include "cloud model" ones.
   - *Remove Cloud Model* deletes the key from the keychain.
 
+## Manually testing M8
+
+**Licensing** against the mock Keygen in `mock-cloud`:
+
+```sh
+cargo run -p mock-cloud --bin mock-cloud-server       # prints FM_KEYGEN_URL=… FM_KEYGEN_ACCOUNT=demo FM_KEYGEN_PUBLIC_KEY=…
+FM_KEYGEN_URL=… FM_KEYGEN_ACCOUNT=demo FM_KEYGEN_PUBLIC_KEY=… cargo run -p app --release
+```
+
+- The toolbar says **Free**. *Tools → Organize…*, ✦ (AI search), the terminal, *Add Cloud Storage* and *Connect
+  to Server* open the Pro dialog instead.
+- Toolbar **Free** → enter `DEMO-PRO-KEY` → *Activate*: "Licensed to Demo Pro.", and everything unlocks. Quit and
+  start again with the mock server stopped: still Pro (offline machine file).
+- *Deactivate* frees the seat: back to Free, and the key is gone from the keychain. A third machine on the same
+  key (two seats) is refused with "already in use on its maximum number of computers" (covered by
+  `adapter-keygen/tests/keygen.rs`).
+- Without `FM_KEYGEN_*`, debug builds say **Pro (developer build)** and release builds say Free.
+
+**Packaging** (macOS):
+
+```sh
+cargo xtask package-macos --universal          # target/package/FinderMaxxing.app and FinderMaxxing-0.1.0.dmg, signed ad hoc
+open target/package/FinderMaxxing-0.1.0.dmg    # drag to Applications; first open: right-click → Open (ad hoc)
+codesign --verify --deep --strict --verbose=2 target/package/FinderMaxxing.app
+```
+
+The About/License dialog (toolbar edition button) shows the version. Sparkle's *Check for Updates…* appears only
+when the bundle was packaged with `FM_APPCAST_URL` and `FM_SPARKLE_PUBLIC_KEY`.
+
+## Packaging and releases
+
+| | Command | Needs |
+|---|---|---|
+| macOS DMG | `cargo xtask package-macos [--universal] [--sign "Developer ID Application: …"] [--notarize PROFILE]` | Xcode tools, `QMAKE`, `cargo-about`; `rustup target add aarch64-apple-darwin x86_64-apple-darwin` for `--universal`; a notary profile from `xcrun notarytool store-credentials PROFILE` |
+| AppImage | `cargo xtask package-appimage` | `linuxdeploy` and `linuxdeploy-plugin-qt` on `PATH` (or `LINUXDEPLOY=…`), `QMAKE`, `cargo-about` |
+| Flatpak | `python3 flatpak-cargo-generator.py Cargo.lock -o packaging/linux/flatpak/cargo-sources.json`, then `flatpak-builder --user --install build packaging/linux/flatpak/dev.findermaxxing.FinderMaxxing.yml` | `flatpak-builder`, `org.kde.Sdk//6.8`, `io.qt.qtwebengine.BaseApp//6.8`, the rust-stable SDK extension |
+
+Compiled in when set at build time:
+- `FM_KEYGEN_ACCOUNT`, `FM_KEYGEN_PUBLIC_KEY` (`FM_KEYGEN_URL`): the license server.
+- `FM_STORE_URL`: *Buy Pro*.
+- `FM_RELEASES_URL`: the releases page.
+
+Read when packaging:
+- `FM_APPCAST_URL`, `FM_SPARKLE_PUBLIC_KEY`: Sparkle.
+- `FM_RELEASES_REPO` (`owner/repo`): AppImage in-place updates.
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds, signs, notarizes and publishes all three
+packages plus the Sparkle appcast to the public releases repository. Its header lists the secrets and variables
+to configure. Sparkle's EdDSA keys come from `generate_keys` in the Sparkle distribution. Keep the private key
+only in the `SPARKLE_PRIVATE_KEY` secret.
+
 ## Layout
 
 ```
@@ -293,6 +345,7 @@ crates/
   adapter-imaging/        image conversion and resizing, perceptual hashes, EXIF read and lossless stripping
   adapter-terminal/       the terminal: login shell on a PTY, emulated by alacritty_terminal
   adapter-cloud-models/   the user's own cloud model for organization suggestions (Anthropic, OpenAI-compatible)
+  adapter-keygen/         licensing through Keygen: activation, signed offline machine files, this computer's fingerprint
   adapter-smb/            smb:// provider (pure-Rust smb2): Windows and NAS shares, resumable writes
   adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal,
                           content index (int8 vectors) and AI settings
@@ -301,5 +354,6 @@ crates/
                           clipboard, keyboard and Quick Look shims, QML
   app/                    composition root (the `findermaxxing` binary)
   arch-tests/             fails CI if layers point the wrong way
-xtask/                    cargo xtask ci | licenses
+xtask/                    cargo xtask ci | licenses | package-macos | package-appimage
+packaging/                Info.plist inputs (entitlements, icon), .desktop, AppStream metainfo, Flatpak manifest, bundled notices
 ```

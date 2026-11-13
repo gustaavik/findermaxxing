@@ -1,5 +1,9 @@
 //! `cargo xtask ci`       — every gate CI runs, in the same order, locally.
 //! `cargo xtask licenses` — third-party license report for distribution.
+//! `cargo xtask package-macos [--universal] [--sign IDENTITY] [--notarize PROFILE]`,
+//! `cargo xtask package-appimage` — release packages (see `package.rs`).
+
+mod package;
 
 use std::env;
 use std::process::{Command, ExitCode};
@@ -17,11 +21,26 @@ struct Step {
 
 fn main() -> ExitCode {
     let task = env::args().nth(1);
+    let rest: Vec<String> = env::args().skip(2).collect();
+    let packaged = match task.as_deref() {
+        Some("package-macos") => Some(package::macos(&rest)),
+        Some("package-appimage") => Some(package::appimage()),
+        _ => None,
+    };
+    if let Some(outcome) = packaged {
+        return outcome.map_or_else(
+            |error| {
+                eprintln!("xtask: {error}");
+                ExitCode::FAILURE
+            },
+            |()| ExitCode::SUCCESS,
+        );
+    }
     let steps = match task.as_deref() {
         Some("ci") => ci_steps(),
         Some("licenses") => vec![license_step()],
         _ => {
-            eprintln!("usage: cargo xtask <ci|licenses>");
+            eprintln!("usage: cargo xtask <ci|licenses|package-macos|package-appimage>");
             return ExitCode::FAILURE;
         }
     };

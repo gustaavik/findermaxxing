@@ -18,6 +18,7 @@ mod dropbox;
 mod google;
 mod graph;
 mod http;
+pub mod keygen;
 pub mod models;
 mod oauth;
 mod tree;
@@ -50,6 +51,7 @@ pub struct State {
     pub model_calls: Vec<models::ModelCall>,
     /// What the model APIs answer next: status and JSON body.
     pub model_replies: std::collections::VecDeque<(u16, serde_json::Value)>,
+    pub keygen: keygen::KeygenState,
 }
 
 /// A resumable upload in progress (Drive session, Dropbox session, Graph session).
@@ -92,6 +94,7 @@ impl MockCloud {
             api_calls: 0,
             model_calls: Vec::new(),
             model_replies: std::collections::VecDeque::new(),
+            keygen: keygen::KeygenState::default(),
         }));
         let shared = Arc::clone(&state);
         tokio::spawn(async move {

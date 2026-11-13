@@ -21,6 +21,7 @@ mod input_bridge;
 mod item_details_controller;
 mod job_reporting;
 mod job_text;
+mod license_controller;
 mod operations_controller;
 mod organize_controller;
 mod organize_json;
@@ -37,12 +38,14 @@ mod sidebar_controller;
 mod terminal_controller;
 mod terminal_palette;
 mod treemap;
+mod updater_bridge;
+mod updater_controller;
 mod utility_jobs;
 mod view_model;
 
 pub use services::{
-    AiSearch, AppServices, CloudDrives, FileOperations, IndexStatusFeed, ItemDetails, Offline, Organize, Places,
-    RemoteAccounts, SavedSearches, ServerAccounts, Utilities,
+    AiSearch, AppServices, CloudDrives, FileOperations, IndexStatusFeed, ItemDetails, LicenseUseCases, Licensing,
+    Offline, Organize, Places, RemoteAccounts, SavedSearches, ServerAccounts, Utilities,
 };
 
 /// Starts the Qt event loop and blocks until the last window closes.

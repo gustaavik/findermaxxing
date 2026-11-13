@@ -14,7 +14,7 @@ flowchart RL
     local["adapter-local-fs<br/><i>Lister, Watcher, Copier, Mover,<br/>Remover, FolderMaker, Trasher, Launcher,<br/>Reader, Writer, VolumeLister, LocalFileOpener</i>"] --> application
     tokio_rt["adapter-tokio-runtime<br/><i>Clock</i>"] --> application
     preview["adapter-preview<br/><i>TextRenderer, ArchiveInspector</i>"] --> application
-    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore, ServerAccountStore,<br/>FavoritesStore, PinStore, CacheIndex, TransferJournal,<br/>SemanticIndex, AiSettingsStore</i>"] --> application
+    store["adapter-sqlite-store<br/><i>SavedSearchStore, AccountStore, ServerAccountStore,<br/>FavoritesStore, PinStore, CacheIndex, TransferJournal,<br/>SemanticIndex, AiSettingsStore, LicenseStore</i>"] --> application
     cache["adapter-file-cache<br/><i>CachingResolver (MountResolver decorator),<br/>Materializer, Lister, CacheJanitor</i>"] --> application
     sftp["adapter-sftp<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
     webdav["adapter-webdav<br/><i>Lister, Reader, Writer, Copier, Mover,<br/>Remover, FolderMaker, ServerConnector</i>"] --> application
@@ -32,6 +32,7 @@ flowchart RL
     terminal["adapter-terminal<br/><i>TerminalLauncher</i>"] --> application
     cloudmodels["adapter-cloud-models<br/><i>OrganizationModel</i>"] --> application
     keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
+    keygen["adapter-keygen<br/><i>LicenseServer, MachineFileReader,<br/>MachineIdentity</i>"] --> oauth
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
 
@@ -55,10 +56,11 @@ flowchart RL
     app --> imaging
     app --> terminal
     app --> cloudmodels
+    app --> keygen
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M7)
+## Ports and their implementations (M1–M8)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -96,6 +98,10 @@ flowchart RL
 | `TagEditor` | `LocalFs` (Finder tags / `user.xdg.tags`), `FakeVfs` | `tag_contract_tests!` for both; `adapter-local-fs/src/tags.rs` (Finder colours kept) |
 | `OrganizationModel` | `adapter_cloud_models::HttpOrganizationModel`, `testing::ScriptedModel` | `adapter-cloud-models/tests/apis.rs` against `mock-cloud` (headers, schema, refusal, retries, fallback without `response_format`); `application/tests/organize.rs` |
 | `CloudModelStore` | `SqliteStore`, `testing::InMemoryCloudModels` | `servers_cache_journal.rs` (survives reopen, clears) |
+| `LicenseServer` | `adapter_keygen::KeygenServer`, `testing::ScriptedLicenseServer` | `adapter-keygen/tests/keygen.rs` against `mock-cloud`'s Keygen (activation, machine limits, unknown and suspended keys, deactivation); `application/tests/licensing.rs` |
+| `MachineFileReader` | `adapter_keygen::KeygenMachineFiles` (Ed25519), `testing::FakeMachineFiles` | `keygen.rs` (real signed files; tampered and forged files refused) |
+| `MachineIdentity` | `adapter_keygen::HostIdentity`, `testing::FixedMachine` | fingerprint stability unit test |
+| `LicenseStore` | `SqliteStore`, `testing::InMemoryLicenseStore` | `servers_cache_journal.rs` (survives reopen, clears) |
 | `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |
 | `S3Connector` | `S3Service`, `testing::FakeS3Connector` | `across_providers.rs` (add/rollback, buckets by name, permission denied) |
 | `AccountStore`, `FavoritesStore` | `SqliteStore`, `testing::{InMemoryAccounts, InMemoryFavorites}` | `adapter-sqlite-store/tests/accounts_and_favorites.rs` |
@@ -169,6 +175,19 @@ flowchart RL
 3. *Apply* hands the resolved plan (JSON) to `OperationsController.applyOrganization`: an `ApplySuggestions` job
    creates folders, trashes, moves and renames, and tags, recorded as one `Organize` history entry.
 4. *Undo Organize* runs the inverse sequence: tags back, items back, empty new folders trashed.
+
+## Runtime flow: licensing (M8)
+
+1. At start, `LicenseController.refresh` runs `CurrentLicense`: the stored machine file is verified offline (Ed25519)
+   and `domain::license_status` decides Free or Pro, so the window never waits on the network.
+2. Then `RenewLicense` checks the file out again if fewer than 10 days are left (and every 6 hours while running).
+3. Every Pro entry point in QML calls `requirePro(feature)` first; when it says no, `ProDialog` explains the upgrade.
+
+## Packaging and updates (M8)
+
+`cargo xtask package-macos` / `package-appimage` and the Flatpak manifest in `packaging/linux/flatpak/` produce the
+release packages; `.github/workflows/release.yml` signs, notarizes and publishes them (ADR 0031). `UpdaterController`
+drives Sparkle (macOS, loaded from the bundle at run time) or AppImageUpdate, and defers to Flatpak inside a sandbox.
 
 ## Dependency injection without globals
 `app` builds `AppServices` (use cases + runtime handle). `bootstrap.cpp` wraps them in a `ServicesHolder` QObject

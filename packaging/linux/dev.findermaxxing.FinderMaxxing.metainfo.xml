@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.findermaxxing.FinderMaxxing</id>
+  <name>FinderMaxxing</name>
+  <summary>Fast file manager for local files, servers and cloud storage</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <developer id="dev.findermaxxing">
+    <name>FinderMaxxing</name>
+  </developer>
+  <description>
+    <p>FinderMaxxing browses huge folders smoothly, previews files, searches by name and contents,
+    and works the same way on S3, SFTP, SMB, WebDAV, Google Drive, Dropbox and OneDrive.</p>
+    <p>The free edition covers local browsing, file operations, previews and search. Pro adds
+    remote storage, AI search, organization suggestions and the utilities.</p>
+  </description>
+  <launchable type="desktop-id">dev.findermaxxing.FinderMaxxing.desktop</launchable>
+  <url type="homepage">https://findermaxxing.dev</url>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-13"/>
+  </releases>
+</component>

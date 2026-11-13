@@ -20,8 +20,10 @@ mod utilities;
 
 pub use utilities::{FakeArchiver, FakeHasher, FakeImageTools, FakeTerminalLauncher, fake_archive};
 
+mod licensing;
 mod organize;
 
+pub use licensing::{FakeMachineFiles, FixedMachine, InMemoryLicenseStore, ScriptedLicenseServer, fake_machine_file};
 pub use organize::{InMemoryCloudModels, ScriptedModel};
 
 use crate::cancel::CancelToken;

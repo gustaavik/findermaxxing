@@ -19,6 +19,8 @@ Pane {
     readonly property string locationsMime: "application/x-findermaxxing-locations"
 
     signal openRequested(string location)
+    // Asks for Pro before a Pro feature; the window supplies it.
+    property var requirePro: feature => true
 
     padding: 0
 
@@ -120,13 +122,13 @@ Pane {
             Layout.rightMargin: 8
             Layout.topMargin: 8
             text: qsTr("Add Cloud Storage…")
-            onClicked: addAccount.open()
+            onClicked: if (sidebar.requirePro("remote-storage")) addAccount.open()
         }
         Button {
             Layout.fillWidth: true
             Layout.margins: 8
             text: qsTr("Connect to Server…")
-            onClicked: connectServer.open()
+            onClicked: if (sidebar.requirePro("remote-storage")) connectServer.open()
         }
     }
 

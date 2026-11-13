@@ -4,6 +4,7 @@
 
 mod drives;
 mod indexing;
+mod licensing;
 mod utilities;
 
 use std::path::PathBuf;
@@ -104,6 +105,7 @@ fn start() -> Result<i32, StartupError> {
     };
     let (ai, language) = indexing::start(&handle, &mounts, &store, &home_dir())?;
     let cloud_models: Arc<dyn CloudModelStore> = store.clone();
+    let licensing = licensing::build(&store, &credentials);
     let cloud_credentials = credentials.clone();
     let accounts = AccountServices { store, credentials, connector: Arc::new(providers.s3.clone()) };
     let operations =
@@ -124,6 +126,7 @@ fn start() -> Result<i32, StartupError> {
         operations,
         utilities,
         organize,
+        licensing,
         places: Places::new(&favorites, Arc::new(LocalVolumes::new(handle.clone()))),
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),

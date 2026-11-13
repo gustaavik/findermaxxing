@@ -12,6 +12,7 @@ mod cloud_model;
 mod drives;
 mod favorites;
 mod journal;
+mod license;
 mod location_codec;
 mod query_format;
 mod semantic;
@@ -118,6 +119,7 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE TABLE ai_settings (id INTEGER PRIMARY KEY CHECK (id = 1), settings TEXT NOT NULL);",
     "CREATE TABLE cloud_model (id INTEGER PRIMARY KEY CHECK (id = 1), settings TEXT NOT NULL);",
+    "CREATE TABLE license (id INTEGER PRIMARY KEY CHECK (id = 1), machine_file TEXT NOT NULL);",
 ];
 
 /// One connection, serialised by a mutex: metadata writes are rare and tiny.

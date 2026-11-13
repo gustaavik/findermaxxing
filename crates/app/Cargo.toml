@@ -35,6 +35,7 @@ adapter-archives.workspace = true
 adapter-imaging.workspace = true
 adapter-terminal.workspace = true
 adapter-cloud-models.workspace = true
+adapter-keygen.workspace = true
 reqwest.workspace = true
 futures.workspace = true
 presentation.workspace = true

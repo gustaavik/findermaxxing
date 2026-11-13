@@ -139,6 +139,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-keygen"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "base64 0.23.1",
+ "domain",
+ "ed25519-dalek",
+ "futures",
+ "infra-oauth",
+ "libc",
+ "mock-cloud",
+ "reqwest",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+]
+
+[[package]]
 name = "adapter-keyring"
 version = "0.1.0"
 dependencies = [
@@ -437,6 +455,7 @@ dependencies = [
  "adapter-file-cache",
  "adapter-gdrive",
  "adapter-imaging",
+ "adapter-keygen",
  "adapter-keyring",
  "adapter-local-fs",
  "adapter-onedrive",
@@ -3864,6 +3883,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "ed25519-dalek",
  "http-body-util",
  "hyper",
  "hyper-util",

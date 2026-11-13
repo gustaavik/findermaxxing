@@ -1,0 +1,157 @@
+name: Release
+
+# Builds, signs and publishes a release when a version tag is pushed (ADR 0031).
+# Binaries go to a public releases repository (FM_RELEASES_REPO), so the
+# source repository can stay private. Configure (Settings → Secrets and variables):
+#
+#   variables  FM_RELEASES_REPO        owner/repo of the public releases repository
+#              FM_KEYGEN_ACCOUNT, FM_KEYGEN_PUBLIC_KEY, FM_STORE_URL   (ADR 0030)
+#              FM_SPARKLE_PUBLIC_KEY   Sparkle EdDSA public key (generate_keys -p)
+#              MACOS_SIGNING_IDENTITY  "Developer ID Application: … (TEAMID)"
+#   secrets    MACOS_CERTIFICATE (base64 .p12), MACOS_CERTIFICATE_PASSWORD
+#              APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   (notarization)
+#              SPARKLE_PRIVATE_KEY     Sparkle EdDSA private key (generate_keys -x)
+#              RELEASES_TOKEN          token with contents:write on FM_RELEASES_REPO
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  QT_VERSION: "6.8.3"
+  SPARKLE_VERSION: "2.10.1"
+  SPARKLE_SHA256: 1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
+  FM_KEYGEN_ACCOUNT: ${{ vars.FM_KEYGEN_ACCOUNT }}
+  FM_KEYGEN_PUBLIC_KEY: ${{ vars.FM_KEYGEN_PUBLIC_KEY }}
+  FM_STORE_URL: ${{ vars.FM_STORE_URL }}
+  FM_RELEASES_REPO: ${{ vars.FM_RELEASES_REPO }}
+  FM_RELEASES_URL: https://github.com/${{ vars.FM_RELEASES_REPO }}/releases/latest
+  FM_APPCAST_URL: https://github.com/${{ vars.FM_RELEASES_REPO }}/releases/latest/download/appcast.xml
+  FM_SPARKLE_PUBLIC_KEY: ${{ vars.FM_SPARKLE_PUBLIC_KEY }}
+
+jobs:
+  macos:
+    name: macOS (universal, signed, notarized)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtimageformats qtpdf qtmultimedia
+          cache: true
+      - run: echo "QMAKE=$(which qmake)" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Signing keychain
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain
+          rm "$RUNNER_TEMP/certificate.p12"
+      - name: Notarization credentials
+        run: xcrun notarytool store-credentials findermaxxing --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      - run: cargo xtask package-macos --universal --sign "${{ vars.MACOS_SIGNING_IDENTITY }}" --notarize findermaxxing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/package/*.dmg
+
+  appimage:
+    name: Linux AppImage
+    # The oldest supported glibc, so the image runs on as many distributions as possible.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev libfuse2 zsync
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtimageformats qtpdf qtmultimedia qtwayland
+          cache: true
+      - run: echo "QMAKE=$(which qmake)" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: linuxdeploy
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          base=https://github.com/linuxdeploy
+          curl -fsSL -o "$RUNNER_TEMP/bin/linuxdeploy" "$base/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          curl -fsSL -o "$RUNNER_TEMP/bin/linuxdeploy-plugin-qt" "$base/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x "$RUNNER_TEMP/bin/"*
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: cargo xtask package-appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: |
+            *.AppImage
+            *.AppImage.zsync
+
+  flatpak:
+    name: Linux Flatpak
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.8
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline crate sources
+        run: |
+          pip install --break-system-packages aiohttp tomlkit
+          curl -fsSL -o flatpak-cargo-generator.py https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+          python3 flatpak-cargo-generator.py Cargo.lock -o packaging/linux/flatpak/cargo-sources.json
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          bundle: FinderMaxxing.flatpak
+          manifest-path: packaging/linux/flatpak/dev.findermaxxing.FinderMaxxing.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+  publish:
+    name: Publish to GitHub Releases
+    needs: [macos, appimage, flatpak]
+    runs-on: macos-14
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          curl -fsSL -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          echo "$SPARKLE_SHA256  sparkle.tar.xz" | shasum -a 256 -c
+          mkdir sparkle && tar -xJf sparkle.tar.xz -C sparkle
+          mkdir mac && cp dist/*.dmg mac/
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle-key"
+          sparkle/bin/generate_appcast --ed-key-file "$RUNNER_TEMP/sparkle-key" \
+            --download-url-prefix "https://github.com/$FM_RELEASES_REPO/releases/download/$GITHUB_REF_NAME/" mac
+          rm "$RUNNER_TEMP/sparkle-key"
+          cp mac/appcast.xml dist/
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$FM_RELEASES_REPO" --title "FinderMaxxing ${GITHUB_REF_NAME#v}" --notes "FinderMaxxing ${GITHUB_REF_NAME#v}"
