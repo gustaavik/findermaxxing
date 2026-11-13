@@ -88,6 +88,7 @@ fn search(w: &World, folders: &[&str]) -> DuplicateSearch {
         min_size: ByteSize(1),
         include_hidden: false,
         similar_images: false,
+        top_level_only: false,
     }
 }
 

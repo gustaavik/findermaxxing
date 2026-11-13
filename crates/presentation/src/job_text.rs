@@ -98,6 +98,7 @@ fn kind_label(kind: OperationKind) -> &'static str {
         OperationKind::ConvertImages => "Convert Images",
         OperationKind::CleanMetadata => "Remove Metadata",
         OperationKind::ChangePermissions => "Change Permissions",
+        OperationKind::Organize => "Organize",
     }
 }
 

@@ -59,6 +59,11 @@ mod permissions {
     vfs_contract_tests::permission_contract_tests!(fixture);
 }
 
+mod tags {
+    use super::fixture;
+    vfs_contract_tests::tag_contract_tests!(fixture);
+}
+
 mod trash {
     use super::fixture;
     vfs_contract_tests::trash_contract_tests!(fixture);

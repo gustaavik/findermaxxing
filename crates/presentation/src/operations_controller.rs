@@ -226,6 +226,9 @@ pub mod qobject {
         );
         #[qinvokable]
         fn secure_delete(self: Pin<&mut OperationsController>, locations: &QStringList);
+        /// Applies a plan from `OrganizeController.acceptedPlan` (one undoable step).
+        #[qinvokable]
+        fn apply_organization(self: Pin<&mut OperationsController>, plan: &QString, folder: &QString);
 
         #[qinvokable]
         fn check_interrupted(self: Pin<&mut OperationsController>);
@@ -906,6 +909,7 @@ fn collect_items(operation: &Operation, items: &mut Vec<StoragePath>) {
         Operation::CreatedFolder(path) => items.push(path.clone()),
         Operation::Deleted(paths) | Operation::Created(paths) => items.extend(paths.iter().cloned()),
         Operation::PermissionsChanged(changes) => items.extend(changes.iter().map(|(path, _)| path.clone())),
+        Operation::TagsChanged(changes) => items.extend(changes.iter().map(|(path, _)| path.clone())),
         Operation::Sequence(parts) => parts.iter().for_each(|part| collect_items(part, items)),
     }
 }

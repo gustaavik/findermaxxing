@@ -270,6 +270,10 @@ impl<T: TextEmbedder + 'static> TextEmbedder for Yielding<T> {
         self.0.relevance_floor()
     }
 
+    fn grouping_threshold(&self) -> f32 {
+        self.0.grouping_threshold()
+    }
+
     fn embed_passages(&self, passages: Vec<String>) -> BoxFuture<'static, Result<Vec<Embedding>, EmbedError>> {
         let embedded = self.0.embed_passages(passages);
         async move {

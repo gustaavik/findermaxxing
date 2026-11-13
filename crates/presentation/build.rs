@@ -26,6 +26,8 @@ const QML_FILES: &[&str] = &[
     "qml/CompressDialog.qml",
     "qml/SecureDeleteDialog.qml",
     "qml/TerminalPane.qml",
+    "qml/OrganizeWindow.qml",
+    "qml/CloudModelDialog.qml",
 ];
 
 /// Rust files with `#[cxx::bridge]` or `#[cxx_qt::bridge]` modules.
@@ -49,6 +51,8 @@ const BRIDGE_FILES: &[&str] = &[
     "src/image_metadata_controller.rs",
     "src/permissions_controller.rs",
     "src/terminal_controller.rs",
+    "src/organize_controller.rs",
+    "src/cloud_model_controller.rs",
 ];
 
 /// C++ shims; headers with `Q_OBJECT` are listed so they get moc'd.

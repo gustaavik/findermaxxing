@@ -8,6 +8,7 @@
 
 mod accounts;
 mod cache;
+mod cloud_model;
 mod drives;
 mod favorites;
 mod journal;
@@ -116,6 +117,7 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (location, ordinal)
     );
     CREATE TABLE ai_settings (id INTEGER PRIMARY KEY CHECK (id = 1), settings TEXT NOT NULL);",
+    "CREATE TABLE cloud_model (id INTEGER PRIMARY KEY CHECK (id = 1), settings TEXT NOT NULL);",
 ];
 
 /// One connection, serialised by a mutex: metadata writes are rare and tiny.

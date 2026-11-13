@@ -19,3 +19,6 @@ pub use images::{CleanImageMetadata, ConvertImages, ConvertRequest, ReadImageMet
 pub use permissions::{ChangePermissions, GetPermissions, PermissionsView};
 pub use secure_delete::{SECURE_DELETE_PASSES, SecureDelete};
 pub use terminal::{OpenTerminal, local_folder};
+
+pub(crate) use checksums::opaque_debug;
+pub(crate) use support::{free_path, local_copy};

@@ -42,6 +42,7 @@ FocusScope {
     // Window-wide tools, opened by Main.
     signal findDuplicatesRequested(string location, string label)
     signal diskUsageRequested(string location)
+    signal organizeRequested(string location)
 
     function selection() {
         return entries.selectedLocations()
@@ -798,6 +799,10 @@ FocusScope {
                     const folder = root.toolFolder()
                     root.findDuplicatesRequested(folder.location, folder.label)
                 }
+            }
+            MenuItem {
+                text: qsTr("Organize…")
+                onTriggered: root.organizeRequested(root.toolFolder().location)
             }
             MenuItem {
                 text: qsTr("Disk Usage…")

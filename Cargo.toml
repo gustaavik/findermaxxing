@@ -11,6 +11,7 @@ default-members = [
     "crates/adapter-archives",
     "crates/adapter-imaging",
     "crates/adapter-terminal",
+    "crates/adapter-cloud-models",
     "crates/adapter-dropbox",
     "crates/adapter-file-cache",
     "crates/adapter-gdrive",
@@ -39,6 +40,7 @@ members = [
     "crates/adapter-archives",
     "crates/adapter-imaging",
     "crates/adapter-terminal",
+    "crates/adapter-cloud-models",
     "crates/adapter-dropbox",
     "crates/adapter-file-cache",
     "crates/adapter-gdrive",
@@ -91,6 +93,7 @@ adapter-checksums = { path = "crates/adapter-checksums" }
 adapter-archives = { path = "crates/adapter-archives" }
 adapter-imaging = { path = "crates/adapter-imaging" }
 adapter-terminal = { path = "crates/adapter-terminal" }
+adapter-cloud-models = { path = "crates/adapter-cloud-models" }
 mock-cloud = { path = "crates/mock-cloud" }
 presentation = { path = "crates/presentation" }
 
@@ -158,6 +161,9 @@ image_hasher = "3.1"
 kamadak-exif = "0.6"
 img-parts = "0.4"
 alacritty_terminal = "0.26"
+xattr = "1.7"
+# Finder tags are a binary property list in an extended attribute.
+plist = { version = "1.10", default-features = false }
 cxx = "1.0.205"
 cxx-qt = "0.10.0"
 cxx-qt-lib = { version = "0.10.0", features = ["qt_gui", "qt_qml", "qt_quickcontrols"] }

@@ -25,6 +25,8 @@ pub struct DuplicateSearch {
     pub include_hidden: bool,
     /// Also group images that look alike (decodes every image: slower).
     pub similar_images: bool,
+    /// Only the folders' own files, not what's in their subfolders.
+    pub top_level_only: bool,
 }
 
 pub struct FindDuplicates {
@@ -102,7 +104,7 @@ impl FindDuplicates {
                         continue;
                     }
                     match entry.kind() {
-                        EntryKind::Directory => pending.push(entry.path().clone()),
+                        EntryKind::Directory if !search.top_level_only => pending.push(entry.path().clone()),
                         EntryKind::File => files.push(entry),
                         _ => {}
                     }

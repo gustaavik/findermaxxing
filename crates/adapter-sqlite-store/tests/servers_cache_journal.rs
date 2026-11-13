@@ -243,6 +243,26 @@ async fn the_semantic_index_survives_a_restart_and_filters_like_the_fake() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cloud_model_settings_survive_a_restart_and_clear() {
+    use application::ports::{CloudModelConfig, CloudModelSettings, CloudModelStore, CloudProvider};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let settings = CloudModelSettings {
+        config: CloudModelConfig {
+            provider: CloudProvider::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".into(),
+            model: "llama3.3".into(),
+        },
+        opted_in: vec![location("file:///Users/me/Downloads")],
+    };
+    assert_eq!(CloudModelStore::load(&reopen(&path)).await.unwrap(), None);
+    CloudModelStore::save(&reopen(&path), settings.clone()).await.unwrap();
+    assert_eq!(CloudModelStore::load(&reopen(&path)).await.unwrap(), Some(settings));
+    CloudModelStore::clear(&reopen(&path)).await.unwrap();
+    assert_eq!(CloudModelStore::load(&reopen(&path)).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ai_settings_survive_a_restart() {
     use application::ports::{AiSettings, AiSettingsStore};
     let dir = tempfile::tempdir().unwrap();

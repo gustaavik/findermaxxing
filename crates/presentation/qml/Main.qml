@@ -170,6 +170,7 @@ ApplicationWindow {
                         sidebar: sidebarController
                         onFindDuplicatesRequested: (location, label) => duplicates.openFor(location, label)
                         onDiskUsageRequested: location => diskUsage.openFor(location)
+                        onOrganizeRequested: location => organizeWindow.openFor(location)
                     }
                 }
             }
@@ -231,6 +232,12 @@ ApplicationWindow {
 
     DiskUsageWindow {
         id: diskUsage
+        services: window.services
+        operations: fileOps
+    }
+
+    OrganizeWindow {
+        id: organizeWindow
         services: window.services
         operations: fileOps
     }

@@ -20,12 +20,19 @@ const MODELS_FOLDER: &str = "models";
 /// Searched when AI search is first turned on; the user changes this list.
 const DEFAULT_FOLDERS: [&str; 4] = ["Documents", "Desktop", "Downloads", "Pictures"];
 
+/// The local text model and its installer, shared with organizing so the
+/// model is loaded once.
+pub(crate) struct LanguageModel {
+    pub text: Arc<dyn TextEmbedder>,
+    pub installer: Arc<dyn ModelInstaller>,
+}
+
 pub(crate) fn start(
     runtime: &Handle,
     mounts: &Arc<dyn MountResolver>,
     store: &Arc<SqliteStore>,
     home: &Path,
-) -> Result<AiSearch, VfsError> {
+) -> Result<(AiSearch, LanguageModel), VfsError> {
     let models_root = crate::platform_dir(crate::DATA_HOME_VARIABLE, crate::PLATFORM_DATA_HOME).join(MODELS_FOLDER);
     let installer: Arc<dyn ModelInstaller> = Arc::new(HuggingFaceInstaller::new(models_root.clone(), runtime.clone()));
     let text: Arc<dyn TextEmbedder> = Arc::new(LocalTextEmbedder::new(&models_root, runtime.clone()));
@@ -56,6 +63,7 @@ pub(crate) fn start(
         control,
         default_scope,
     };
+    let language = LanguageModel { text: text.clone(), installer: installer.clone() };
     let search = SemanticSearch::new(text, images, index, settings, installer);
-    Ok(AiSearch::new(&services, search, status))
+    Ok((AiSearch::new(&services, search, status), language))
 }

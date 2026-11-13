@@ -5,8 +5,8 @@ use application::ports::{
     CacheJanitor, FavoritesStore, LocalFileOpener, MountResolver, PinStore, SavedSearchStore, TransferJournal,
     VolumeLister,
 };
+use application::ports::{ContentExtractor, TerminalLauncher, UtilityTools};
 use application::ports::{IndexObserver, ModelInstaller};
-use application::ports::{TerminalLauncher, UtilityTools};
 use application::use_cases::{
     AccountServices, AddBucket, AddFavorite, AddS3Account, BulkRenameEntries, ConnectSavedAccounts, CopyEntries,
     CreateFolder, CreateShareLink, DeletePermanently, DeleteSavedSearch, GetItemProperties, ListBuckets, ListDirectory,
@@ -23,6 +23,7 @@ use application::use_cases::{
     AiSearchServices, ChangeIndexScope, DisableAiSearch, EnableAiSearch, GetAiSettings, IndexerControl, PauseIndexing,
     SemanticSearch,
 };
+use application::use_cases::{AnalyzeFolder, ApplySuggestions, CloudModelSetup, OrganizeParts, PreviewCloudRequest};
 use application::use_cases::{
     ChangePermissions, CleanImageMetadata, CompressItems, ComputeChecksums, ConvertImages, ExtractArchive,
     FindDuplicates, FindPublishedChecksum, GetPermissions, MeasureDiskUsage, OpenTerminal, ReadImageMetadata,
@@ -52,6 +53,7 @@ pub struct AppServices {
     pub offline: Offline,
     pub item_details: ItemDetails,
     pub utilities: Utilities,
+    pub organize: Organize,
     /// Runs every background task of the UI (sessions, jobs, previews).
     pub runtime: Handle,
     /// Where new windows open; bare paths typed by the user resolve on its mount.
@@ -111,6 +113,27 @@ impl Utilities {
             change_permissions: Arc::new(ChangePermissions::new(mounts.clone(), history.clone())),
             secure_delete: Arc::new(SecureDelete::new(mounts.clone())),
             terminal: Arc::new(OpenTerminal::new(terminal, home)),
+        }
+    }
+}
+
+/// Organization suggestions; applying shares the window's undo history.
+#[derive(Debug, Clone)]
+pub struct Organize {
+    pub analyze: Arc<AnalyzeFolder>,
+    pub apply: Arc<ApplySuggestions>,
+    pub cloud: Arc<CloudModelSetup>,
+    pub preview: Arc<PreviewCloudRequest>,
+}
+
+impl Organize {
+    #[must_use]
+    pub fn new(parts: OrganizeParts, operations: &FileOperations, extractor: Arc<dyn ContentExtractor>) -> Self {
+        Self {
+            apply: Arc::new(ApplySuggestions::new(parts.mounts.clone(), operations.history.clone())),
+            cloud: Arc::new(CloudModelSetup::new(parts.cloud.store.clone(), parts.cloud.credentials.clone())),
+            preview: Arc::new(PreviewCloudRequest::new(parts.mounts.clone(), extractor)),
+            analyze: Arc::new(AnalyzeFolder::new(parts)),
         }
     }
 }
@@ -413,6 +436,36 @@ fn fake_utilities(
     Utilities::new(mounts, operations, &tools, Arc::new(FakeTerminalLauncher::default()), "/".into())
 }
 
+/// Organizing over fakes, with a cloud model that proposes nothing.
+#[cfg(test)]
+fn fake_organize(
+    fake: &application::testing::FakeVfs,
+    mounts: &Arc<dyn MountResolver>,
+    operations: &FileOperations,
+    utilities: &Utilities,
+) -> Organize {
+    use application::testing::{
+        FakeExtractor, FakeImageTools, FakeModelInstaller, FakeTextEmbedder, InMemoryCloudModels, InMemoryKeychain,
+        ScriptedModel,
+    };
+    let extractor: Arc<dyn ContentExtractor> = Arc::new(FakeExtractor::new(fake.clone()));
+    let parts = OrganizeParts {
+        mounts: mounts.clone(),
+        extractor: extractor.clone(),
+        text: Arc::new(FakeTextEmbedder::default()),
+        installer: Arc::new(FakeModelInstaller::default()),
+        image_metadata: Arc::new(FakeImageTools::new(fake.clone())),
+        duplicates: utilities.duplicates.clone(),
+        cloud: application::use_cases::CloudParts {
+            store: Arc::new(InMemoryCloudModels::default()),
+            credentials: Arc::new(InMemoryKeychain::default()),
+            model: Arc::new(ScriptedModel::new(Ok(application::ports::ModelProposal::default()))),
+        },
+        policy: domain::ClutterPolicy::default(),
+    };
+    Organize::new(parts, operations, extractor)
+}
+
 /// AI search over fakes: a bag-of-words model and an in-memory index.
 #[cfg(test)]
 fn fake_ai_search(fake: &application::testing::FakeVfs, mounts: &Arc<dyn MountResolver>) -> AiSearch {
@@ -497,6 +550,7 @@ pub(crate) fn fake_services(fake: &application::testing::FakeVfs) -> AppServices
             Arc::new(StubArchiveInspector),
         )),
         saved_searches: SavedSearches::new(&saved),
+        organize: fake_organize(fake, &mounts, &operations, &utilities),
         operations,
         utilities,
         places: Places::new(&favorites, Arc::new(FixedVolumes::default())),

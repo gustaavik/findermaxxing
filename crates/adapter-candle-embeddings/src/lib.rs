@@ -35,6 +35,11 @@ const PASSAGE_BATCH: usize = 8;
 /// unrelated documents up to 0.81), so the floor only trims obvious noise;
 /// ranking does the rest.
 const E5_FLOOR: f32 = 0.79;
+/// Average first-passage similarity for documents to count as one topic.
+/// Measured on three topics in four languages (`tests/real_models.rs`):
+/// pairs within a topic average 0.845, across topics 0.763, and average
+/// linkage separates the topics exactly from 0.78 to 0.81; this is the middle.
+const E5_GROUPING: f32 = 0.80;
 /// CLIP text-to-image similarities are low (matches 0.26–0.31, others ≤ 0.23).
 const CLIP_FLOOR: f32 = 0.22;
 const INSTALLED_MARKER: &str = "installed";
@@ -136,6 +141,10 @@ impl TextEmbedder for LocalTextEmbedder {
 
     fn relevance_floor(&self) -> f32 {
         E5_FLOOR
+    }
+
+    fn grouping_threshold(&self) -> f32 {
+        E5_GROUPING
     }
 
     fn embed_passages(&self, passages: Vec<String>) -> BoxFuture<'static, Result<Vec<Embedding>, EmbedError>> {

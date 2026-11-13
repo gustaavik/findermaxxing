@@ -15,8 +15,10 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 notify.workspace = true
 libc.workspace = true
 getrandom.workspace = true
+xattr.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+plist.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 

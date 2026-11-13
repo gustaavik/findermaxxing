@@ -33,6 +33,10 @@ pub trait TextEmbedder: Send + Sync {
     /// Similarities below this are noise for this model.
     fn relevance_floor(&self) -> f32;
 
+    /// Documents whose first passages are at least this similar, on
+    /// average, are about the same thing (used to suggest folders).
+    fn grouping_threshold(&self) -> f32;
+
     fn embed_passages(&self, passages: Vec<String>) -> BoxFuture<'static, Result<Vec<Embedding>, EmbedError>>;
 
     fn embed_query(&self, query: &str) -> BoxFuture<'static, Result<Embedding, EmbedError>>;

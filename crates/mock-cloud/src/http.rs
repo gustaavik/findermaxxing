@@ -113,6 +113,9 @@ pub async fn handle(
 }
 
 fn route(state: &mut State, request: &Request) -> Reply {
+    if request.path.ends_with("/v1/messages") || request.path.ends_with("/chat/completions") {
+        return crate::models::handle(state, request);
+    }
     if let Some(rest) = request.path.strip_prefix("/oauth/") {
         return crate::oauth::handle(state, rest, request);
     }

@@ -99,3 +99,46 @@ async fn text_queries_find_photos() {
         assert_eq!(best, expected, "{query}: {scores:?}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "downloads ~490 MB of model weights"]
+async fn documents_about_the_same_thing_group_together() {
+    install(ModelPack::Text).await;
+    let embedder = LocalTextEmbedder::new(&models_dir(), tokio::runtime::Handle::current());
+    let topics: [&[&str]; 3] = [
+        &[
+            "Faktura nr. 2041 for el-forbrug i marts. Beløb 1.200 kr, betales senest 15. april.",
+            "Electricity invoice for April: 340 kWh, amount due 98.40 EUR by 20 May.",
+            "Rechnung Stromverbrauch Mai, Betrag 87,10 Euro, fällig am 15. Juni.",
+            "Your power bill for June. Total 112.60 EUR. Direct debit on 1 July.",
+        ],
+        &[
+            "Lasagne: lag pasta, tomatsauce med basilikum og bechamel, bag i 45 minutter.",
+            "Pancakes: mix flour, eggs and milk, rest 30 minutes, fry in butter.",
+            "Kartoffelsuppe: Kartoffeln, Lauch und Brühe 20 Minuten kochen, pürieren.",
+        ],
+        &[
+            "Booking confirmation: Hotel Arts Barcelona, 3 nights from 12 August, 2 adults.",
+            "Flight SK 1415 Copenhagen to Barcelona, departs 12 Aug 07:35, seat 14C.",
+            "Boardingkort: SK 1416 Barcelona–København, 15. august kl. 18.10.",
+        ],
+    ];
+    let texts: Vec<String> = topics.iter().flat_map(|t| t.iter().map(|s| (*s).to_owned())).collect();
+    let passages: Vec<String> = texts.iter().map(|t| domain::passages(t).remove(0)).collect();
+    let vectors = embedder.embed_passages(passages).await.unwrap();
+    let topic_of: Vec<usize> = topics.iter().enumerate().flat_map(|(i, t)| std::iter::repeat_n(i, t.len())).collect();
+    let (mut within, mut across) = (Vec::new(), Vec::new());
+    for i in 0..vectors.len() {
+        for j in (i + 1)..vectors.len() {
+            let similarity = dot(&vectors[i], &vectors[j]);
+            if topic_of[i] == topic_of[j] { within.push(similarity) } else { across.push(similarity) }
+        }
+    }
+    #[allow(clippy::cast_precision_loss, reason = "a few dozen pairs")]
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    println!("within: mean {:.3} min {:.3}", mean(&within), within.iter().copied().fold(f32::MAX, f32::min));
+    println!("across: mean {:.3} max {:.3}", mean(&across), across.iter().copied().fold(f32::MIN, f32::max));
+    let groups = domain::cluster(&vectors, embedder.grouping_threshold());
+    println!("groups at {}: {groups:?}", embedder.grouping_threshold());
+    assert_eq!(groups, [vec![0, 1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]);
+}

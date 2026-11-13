@@ -3,10 +3,11 @@
 A fast, native-feeling file manager for macOS and Linux. Rust + Qt 6 (cxx-qt, QML).
 See [docs/architecture.md](docs/architecture.md) and [docs/adr/](docs/adr/).
 
-**Status: milestone 7a** (7b, AI organization suggestions, is next).
+**Status: milestone 7** (7a and 7b).
 - M1: window, tabs, and a lazily loaded, live-updating folder view.
 - M2: copy, move, rename, new folder, trash with exact restore, permanent delete, and open with the default app. Jobs show progress, ask about conflicts, and can be undone.
 - M3: a preview pane (images, PDF, audio/video, highlighted code, archives) plus Quick Look on macOS; search by name, kind, date and size, with saved searches; and bulk rename with a live preview.
+- M7b: organization suggestions: *Organize…* proposes clean-up (old downloads, installers, big untouched files, duplicates), new folders (screenshots, photo months, documents about the same thing), clearer names (camera files, `scan0001.pdf`) and tags (Finder tags, `user.xdg.tags`). Nothing changes until you tick and apply, and one Undo reverts it all. Optionally your own cloud model (Anthropic or any OpenAI-compatible API) for folders you allow, after showing exactly what would be sent.
 - M7a: utilities: compress and extract (zip, 7z, tar.gz/xz/zst/bz2; RAR extract), checksums with verification, a duplicate finder (including look-alike photos), a disk-usage treemap, image convert/resize and metadata viewer/cleaner, batch permissions, secure delete, and a built-in terminal that follows the folder. Everything that changes files can be undone, except secure delete.
 - M6: AI search: find files by what they say or show, in your own words and many languages ("strømregning fra marts", "photos of the cats"). Local models on candle, downloaded once after you agree; nothing leaves the machine.
 - M5b: Google Drive, Dropbox and OneDrive, signed in through the browser (OAuth + PKCE), with Google Docs exported to Office formats. Needs OAuth client IDs: [docs/oauth-setup.md](docs/oauth-setup.md).
@@ -240,6 +241,32 @@ docker run -d --rm --name findermaxxing-sftp -p 127.0.0.1:2222:22 atmoz/sftp fmt
 cargo test -p adapter-sftp --test sftp_contract -- --ignored permissions
 ```
 
+## Manually testing M7b
+
+```sh
+mkdir -p ~/fm-m7b && cd ~/fm-m7b
+printf 'installer' > Zoom.dmg && touch -t 202601010000 Zoom.dmg
+printf 'quarterly report' > report.txt && cp report.txt "report (1).txt"
+for m in March April May; do printf "Electricity invoice $m\nAmount due 98 EUR, electricity company invoice" > "power-$m.txt"; done
+printf 'Lease agreement for the flat\nParties: …' > Untitled.txt
+for i in 1 2 3 4 5; do screencapture -x "Screenshot 2026-11-0$i at 10.00.00.png"; done   # macOS; any 5 PNGs named "Screenshot …"
+cargo run -p app --release
+```
+
+- Right-click in the folder → *Tools → Organize…*. Expect:
+  - **Clean up:** `Zoom.dmg`, `report (1).txt` (a copy of `report.txt`).
+  - **New folders:** `Screenshots/` and, with AI search's language model installed, `Electricity/` for the
+    three invoices.
+  - **Clearer names:** `Untitled.txt` → `Lease agreement for the flat.txt`.
+  - **Tags:** `Invoice`, `Contract`.
+- Tick some or all of them: the right side shows before → after. *Apply*, then look in Finder: the tags are
+  real Finder tags. *Undo Organize* puts everything back, tags included.
+- **Cloud model:** *Cloud Model…* → pick Anthropic (or an OpenAI-compatible address such as
+  `http://localhost:11434/v1` for Ollama) and enter the key.
+  - *Show What Would Be Sent* lists exactly the summary that would leave the machine.
+  - *Allow for This Folder*, then *Analyze Again*: the suggestions now include "cloud model" ones.
+  - *Remove Cloud Model* deletes the key from the keychain.
+
 ## Layout
 
 ```
@@ -265,6 +292,7 @@ crates/
   adapter-archives/       zip, tar (gz, bz2, xz, zst), 7z read/write; RAR extraction through RARLAB's unRAR
   adapter-imaging/        image conversion and resizing, perceptual hashes, EXIF read and lossless stripping
   adapter-terminal/       the terminal: login shell on a PTY, emulated by alacritty_terminal
+  adapter-cloud-models/   the user's own cloud model for organization suggestions (Anthropic, OpenAI-compatible)
   adapter-smb/            smb:// provider (pure-Rust smb2): Windows and NAS shares, resumable writes
   adapter-sqlite-store/   metadata store (SQLite): saved searches, accounts, servers, favorites, cache index, pins, transfer journal,
                           content index (int8 vectors) and AI settings

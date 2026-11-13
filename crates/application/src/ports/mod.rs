@@ -13,6 +13,7 @@ mod journal;
 mod lister;
 mod mount;
 mod mutation;
+mod organize;
 mod places;
 mod preview;
 mod remote_item;
@@ -37,6 +38,10 @@ pub use mount::{MountHandle, MountHandleBuilder, MountResolver, ProviderFactory}
 pub use mutation::{
     Copier, DynCopier, DynFolderMaker, DynLauncher, DynMover, DynRemover, DynTrasher, FolderMaker, Launcher, Mover,
     ProgressCallback, Remover, Trasher,
+};
+pub use organize::{
+    CloudModelConfig, CloudModelSettings, CloudModelStore, CloudProvider, ItemSummary, ModelError, ModelProposal,
+    OrganizationModel, OrganizeRequest, ProposedGroup, ProposedRename, ProposedTags, TagEditor,
 };
 pub use places::{FavoritesStore, LocalFileOpener, Volume, VolumeLister};
 pub use preview::{

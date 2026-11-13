@@ -22,8 +22,8 @@ use adapter_tokio_runtime::TokioClock;
 use adapter_webdav::WebDavService;
 use application::ProviderRegistry;
 use application::ports::{
-    CacheIndex, CredentialStore, FavoritesStore, MountResolver, PinStore, SavedSearchStore, ServerConnector,
-    StoreError, TransferJournal,
+    CacheIndex, CloudModelStore, CredentialStore, FavoritesStore, MountResolver, PinStore, SavedSearchStore,
+    ServerConnector, StoreError, TransferJournal,
 };
 use application::use_cases::{
     AccountServices, CoalesceWindow, DriveServices, ListDirectory, PreparePreview, SearchFiles, ServerServices,
@@ -66,6 +66,8 @@ enum StartupError {
     Home(#[from] domain::VfsError),
     #[error("no metadata store, not even in memory: {0}")]
     Store(#[from] StoreError),
+    #[error("could not set up HTTPS: {0}")]
+    Http(#[from] reqwest::Error),
 }
 
 fn main() -> ExitCode {
@@ -100,11 +102,15 @@ fn start() -> Result<i32, StartupError> {
         credentials: credentials.clone(),
         connectors: providers.drives.connectors(),
     };
-    let ai = indexing::start(&handle, &mounts, &store, &home_dir())?;
+    let (ai, language) = indexing::start(&handle, &mounts, &store, &home_dir())?;
+    let cloud_models: Arc<dyn CloudModelStore> = store.clone();
+    let cloud_credentials = credentials.clone();
     let accounts = AccountServices { store, credentials, connector: Arc::new(providers.s3.clone()) };
     let operations =
         FileOperations::new(&mounts, Arc::new(LocalOpener::new(handle.clone())), CostPolicy::default(), &journal);
     let utilities = utilities::build(&handle, &mounts, &operations, home_dir());
+    let organize =
+        utilities::organize(&handle, &mounts, &operations, &utilities, language, cloud_models, cloud_credentials)?;
     let services = AppServices {
         list_directory: Arc::new(ListDirectory::new(mounts.clone())),
         watch_directory: Arc::new(WatchDirectory::new(mounts.clone(), Arc::new(TokioClock), CoalesceWindow::default())),
@@ -117,6 +123,7 @@ fn start() -> Result<i32, StartupError> {
         saved_searches: SavedSearches::new(&saved),
         operations,
         utilities,
+        organize,
         places: Places::new(&favorites, Arc::new(LocalVolumes::new(handle.clone()))),
         accounts: RemoteAccounts::new(&accounts),
         servers: ServerAccounts::new(&servers),

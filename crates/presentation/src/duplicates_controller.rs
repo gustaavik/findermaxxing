@@ -120,6 +120,7 @@ impl qobject::DuplicatesController {
             min_size: ByteSize((u64::try_from(min_size_kib).unwrap_or(0) * BYTES_PER_KIB).max(1)),
             include_hidden,
             similar_images,
+            top_level_only: false,
         };
         let source = CancellationSource::new();
         let cancel = source.token();

@@ -55,6 +55,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-cloud-models"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "domain",
+ "futures",
+ "mock-cloud",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "adapter-content-extract"
 version = "0.1.0"
 dependencies = [
@@ -147,9 +160,11 @@ dependencies = [
  "notify",
  "objc2",
  "objc2-foundation",
+ "plist",
  "tempfile",
  "tokio",
  "vfs-contract-tests",
+ "xattr",
 ]
 
 [[package]]
@@ -416,6 +431,7 @@ dependencies = [
  "adapter-archives",
  "adapter-candle-embeddings",
  "adapter-checksums",
+ "adapter-cloud-models",
  "adapter-content-extract",
  "adapter-dropbox",
  "adapter-file-cache",
@@ -4382,6 +4398,18 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "plist"
+version = "1.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "327a4cb2ad49dc48adfdc9da89e22c64d488b508c67a044d71ba729e4521a285"
+dependencies = [
+ "base64 0.23.1",
+ "indexmap",
+ "quick-xml",
+ "time",
+]
 
 [[package]]
 name = "png"

@@ -30,6 +30,7 @@ flowchart RL
     archives["adapter-archives<br/><i>ArchiveExtractor, ArchiveBuilder</i>"] --> application
     imaging["adapter-imaging<br/><i>ImageConverter, ImageFingerprinter, ImageMetadata</i>"] --> application
     terminal["adapter-terminal<br/><i>TerminalLauncher</i>"] --> application
+    cloudmodels["adapter-cloud-models<br/><i>OrganizationModel</i>"] --> application
     keyring["adapter-keyring<br/><i>CredentialStore</i>"] --> application
     contract["vfs-contract-tests<br/><i>Liskov contract</i>"] --> application
     presentation["presentation<br/><i>cxx-qt bridge, C++ shim, QML</i>"] --> application
@@ -53,10 +54,11 @@ flowchart RL
     app --> archives
     app --> imaging
     app --> terminal
+    app --> cloudmodels
     app --> presentation
 ```
 
-## Ports and their implementations (M1–M7a)
+## Ports and their implementations (M1–M7)
 
 | Port (application) | Implemented by | Proven by |
 |---|---|---|
@@ -91,6 +93,9 @@ flowchart RL
 | `PermissionEditor` | `LocalFs` (`chmod`), `SftpFs` (`setstat`), `FakeVfs` | `permission_contract_tests!` for all three (SFTP against OpenSSH in Docker) |
 | `SecureEraser` | `LocalFs`, `FakeVfs` | `adapter-local-fs/src/erase.rs` tests; `application/tests/utilities.rs` |
 | `TerminalLauncher`, `TerminalSession` | `adapter_terminal::AlacrittyLauncher`, `testing::FakeTerminalLauncher` | `adapter-terminal/tests/shell.rs` (real login shell: commands, colours, following only at the prompt, exit); key encoding unit tests |
+| `TagEditor` | `LocalFs` (Finder tags / `user.xdg.tags`), `FakeVfs` | `tag_contract_tests!` for both; `adapter-local-fs/src/tags.rs` (Finder colours kept) |
+| `OrganizationModel` | `adapter_cloud_models::HttpOrganizationModel`, `testing::ScriptedModel` | `adapter-cloud-models/tests/apis.rs` against `mock-cloud` (headers, schema, refusal, retries, fallback without `response_format`); `application/tests/organize.rs` |
+| `CloudModelStore` | `SqliteStore`, `testing::InMemoryCloudModels` | `servers_cache_journal.rs` (survives reopen, clears) |
 | `MetadataEditor`, `Presigner`, `VersionLister` | `BucketFs` | `application/tests/across_providers.rs` (use cases on the fake); manual check against SeaweedFS |
 | `S3Connector` | `S3Service`, `testing::FakeS3Connector` | `across_providers.rs` (add/rollback, buckets by name, permission denied) |
 | `AccountStore`, `FavoritesStore` | `SqliteStore`, `testing::{InMemoryAccounts, InMemoryFavorites}` | `adapter-sqlite-store/tests/accounts_and_favorites.rs` |
@@ -154,6 +159,16 @@ flowchart RL
    theme, and pushes runs into the C++ `TerminalView`, which paints them.
 3. Keys, input-method text, the wheel and the mouse come back as signals → `TerminalSession`.
 4. Changing folders calls `follow`, which types a `cd` only while a shell leads the foreground process group.
+
+## Runtime flow: organizing a folder (M7b)
+
+1. *Tools → Organize…* opens `OrganizeWindow`; `OrganizeController.analyze` runs `AnalyzeFolder`: clutter rules
+   and duplicates, then the cloud model (only for an opted-in folder with a key), then local rules and the local
+   language model.
+2. The user ticks suggestions; every change re-runs `domain::resolve`, and the window shows before → after.
+3. *Apply* hands the resolved plan (JSON) to `OperationsController.applyOrganization`: an `ApplySuggestions` job
+   creates folders, trashes, moves and renames, and tags, recorded as one `Organize` history entry.
+4. *Undo Organize* runs the inverse sequence: tags back, items back, empty new folders trashed.
 
 ## Dependency injection without globals
 `app` builds `AppServices` (use cases + runtime handle). `bootstrap.cpp` wraps them in a `ServicesHolder` QObject

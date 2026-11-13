@@ -100,15 +100,46 @@ fn root(parent: &mut [usize], mut i: usize) -> usize {
     i
 }
 
-/// Orders a group with the one to keep first: the oldest, then the one
-/// with the shortest path (the "original" rarely sits deepest), then by name.
+/// Words that browsers, Finder and file managers add to copies.
+const COPY_WORDS: &[&str] = &["copy", "kopi", "kopie", "copie", "copia"];
+
+/// Numbers file managers append to copies (`report 2.pdf`); longer
+/// numbers are more likely part of the name (`Meeting 2026.pdf`).
+const MAX_COPY_NUMBER_DIGITS: usize = 2;
+
+/// `report (1).pdf`, `report copy.pdf`, `report copy 2.pdf`, `report 2.pdf`,
+/// `report-kopi.pdf`.
+#[must_use]
+pub fn looks_like_copy(name: &crate::path::PathSegment) -> bool {
+    let (stem, _) = name.stem_and_extension();
+    let stem = String::from_utf8_lossy(stem).trim().to_lowercase();
+    let is_number = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit());
+    if let Some(inside) = stem.strip_suffix(')').and_then(|s| s.rsplit_once(" (")).map(|(_, n)| n)
+        && is_number(inside)
+    {
+        return true;
+    }
+    let words: Vec<&str> = stem.split([' ', '-', '_']).filter(|w| !w.is_empty()).collect();
+    match words.as_slice() {
+        [.., before, last] if is_number(last) => {
+            COPY_WORDS.contains(before) || (last.len() <= MAX_COPY_NUMBER_DIGITS && stem.contains(' '))
+        }
+        [_, .., last] => COPY_WORDS.contains(last),
+        _ => false,
+    }
+}
+
+/// Orders a group with the one to keep first: the oldest, then one whose
+/// name doesn't look like a copy, then the shortest path (the "original"
+/// rarely sits deepest), then by name.
 #[must_use]
 pub fn keeper_first(matching: DuplicateMatch, mut items: Vec<FileEntry>) -> DuplicateGroup {
     items.sort_by(|a, b| {
         let age = a.metadata().modified.cmp(&b.metadata().modified);
         let modified_both = a.metadata().modified.is_some() && b.metadata().modified.is_some();
         let age = if modified_both { age } else { std::cmp::Ordering::Equal };
-        age.then_with(|| a.path().segments().len().cmp(&b.path().segments().len()))
+        age.then_with(|| looks_like_copy(a.name()).cmp(&looks_like_copy(b.name())))
+            .then_with(|| a.path().segments().len().cmp(&b.path().segments().len()))
             .then_with(|| natural_cmp(&a.path().path_string(), &b.path().path_string()))
     });
     DuplicateGroup { matching, items }
@@ -164,6 +195,20 @@ mod tests {
         );
         assert_eq!(group.items[0].path().path_string(), "/x.jpg");
         assert_eq!(group.reclaimable(), ByteSize(10));
+    }
+
+    #[test]
+    fn copies_are_recognised_by_their_names() {
+        let seg = |s: &str| crate::PathSegment::new(s).unwrap();
+        for copy in ["report (1).pdf", "report copy.pdf", "report copy 2.pdf", "report 2.pdf", "report-kopi.pdf"] {
+            assert!(looks_like_copy(&seg(copy)), "{copy}");
+        }
+        for original in ["report.pdf", "2026 budget.xlsx", "photo123.jpg", "v2.txt"] {
+            assert!(!looks_like_copy(&seg(original)), "{original}");
+        }
+        let group =
+            keeper_first(DuplicateMatch::Identical, vec![file("/d/report (1).pdf", 5, 1), file("/d/report.pdf", 5, 1)]);
+        assert_eq!(group.items[0].name().display_name(), "report.pdf");
     }
 
     #[test]

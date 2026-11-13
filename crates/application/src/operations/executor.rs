@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use domain::{Action, ByteSize, ModeChange, Operation, Relocation, StoragePath, TrashTicket, UnixMode};
+use domain::{Action, ByteSize, ModeChange, Operation, Relocation, StoragePath, Tag, TrashTicket, UnixMode};
 
 use super::context::JobContext;
 use super::error::{OperationError, OperationReport};
@@ -60,6 +60,7 @@ fn step_items(step: &Action) -> u64 {
         Action::Restore(tickets) => tickets.len(),
         Action::Move(moves) => moves.len(),
         Action::SetPermissions(modes) => modes.len(),
+        Action::SetTags(tags) => tags.len(),
         Action::Sequence(parts) => parts.len(),
     };
     count as u64
@@ -79,6 +80,7 @@ async fn run_step(
         Action::Restore(tickets) => restore_all(mounts, tickets, tracker, ctx).await,
         Action::Move(moves) => move_all(mounts, moves, tracker, ctx).await,
         Action::SetPermissions(modes) => set_permissions_all(mounts, modes, tracker, ctx).await,
+        Action::SetTags(tags) => set_tags_all(mounts, tags, tracker, ctx).await,
         Action::Sequence(_) => (Operation::sequence(Vec::new()), Ok(())),
     }
 }
@@ -174,6 +176,34 @@ pub(crate) async fn set_permissions_all(
         tracker.item_finished();
     }
     (Operation::PermissionsChanged(changed), Ok(()))
+}
+
+/// Replaces each item's tags; records what they were, for undo.
+pub(crate) async fn set_tags_all(
+    mounts: &dyn MountResolver,
+    tags: &[(StoragePath, Vec<Tag>)],
+    tracker: &ProgressTracker,
+    ctx: &JobContext,
+) -> StepOutcome {
+    let mut before = Vec::with_capacity(tags.len());
+    for (path, wanted) in tags {
+        if ctx.cancel.is_cancelled() {
+            return (Operation::TagsChanged(before), Err(OperationError::Cancelled));
+        }
+        tracker.item_started(path.name());
+        let result = async {
+            let editor = mounts.resolve(path.mount())?.tag_editor()?;
+            let previous = editor.tags(path).await?;
+            editor.set_tags(path, wanted.clone()).await?;
+            Ok::<_, domain::VfsError>(previous)
+        };
+        match result.await {
+            Ok(previous) => before.push((path.clone(), previous)),
+            Err(error) => return (Operation::TagsChanged(before), Err(OperationError::on(path)(error))),
+        }
+        tracker.item_finished();
+    }
+    (Operation::TagsChanged(before), Ok(()))
 }
 
 /// Sets `mode`, returning what it was before.

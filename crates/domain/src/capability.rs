@@ -29,6 +29,8 @@ pub enum Capability {
     EditPermissions,
     /// Files can be overwritten before removal (local disks only).
     SecureErase,
+    /// Native tags (Finder tags, `user.xdg.tags`) can be read and set.
+    EditTags,
     /// Rename is a single atomic operation (false on S3: copy + delete).
     AtomicRename,
     ServerSideCopy,

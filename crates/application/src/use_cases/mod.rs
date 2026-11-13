@@ -7,6 +7,7 @@ mod item_details;
 mod list_directory;
 mod offline;
 mod open_entry;
+mod organize;
 mod places;
 mod prepare_preview;
 mod rename_entry;
@@ -35,6 +36,10 @@ pub use item_details::{
 pub use list_directory::{HiddenFiles, ListDirectory, ListRequest};
 pub use offline::{ForgetLocalCopies, GetOfflineStatus, MakeAvailableOffline, OfflineStatus, RemoveOfflineCopy};
 pub use open_entry::OpenEntry;
+pub use organize::{
+    Analysis, AnalyzeFolder, ApplySuggestions, CloudModelSetup, CloudModelStatus, CloudParts, CloudUse, EXCERPT_CHARS,
+    OrganizeError, OrganizeParts, PreviewCloudRequest, clutter_text,
+};
 pub use places::{AddFavorite, ListFavorites, ListVolumes, RemoveFavorite};
 pub use prepare_preview::{ARCHIVE_PREVIEW_LIMIT, PreparePreview, Preview, PreviewBody};
 pub use rename_entry::RenameEntry;

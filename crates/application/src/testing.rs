@@ -20,6 +20,10 @@ mod utilities;
 
 pub use utilities::{FakeArchiver, FakeHasher, FakeImageTools, FakeTerminalLauncher, fake_archive};
 
+mod organize;
+
+pub use organize::{InMemoryCloudModels, ScriptedModel};
+
 use crate::cancel::CancelToken;
 use crate::ports::{
     AccountStore, ArchiveInspector, ArchiveItem, ArchiveListing, BucketInfo, ByteStream, CacheIndex, CacheRecord,
@@ -40,6 +44,8 @@ struct Node {
     kind: EntryKind,
     metadata: EntryMetadata,
     content: Vec<u8>,
+    /// Native tags; they travel with the item, as xattrs do.
+    tags: Vec<domain::Tag>,
 }
 
 #[derive(Debug, Default)]
@@ -100,9 +106,15 @@ impl FakeVfs {
     fn with_traits(traits: FakeTraits) -> Self {
         let fake = Self { state: Arc::default(), traits: Arc::new(traits) };
         let root = fake.path("/");
-        fake.lock()
-            .nodes
-            .insert(root, Node { kind: EntryKind::Directory, metadata: EntryMetadata::default(), content: Vec::new() });
+        fake.lock().nodes.insert(
+            root,
+            Node {
+                kind: EntryKind::Directory,
+                metadata: EntryMetadata::default(),
+                content: Vec::new(),
+                tags: Vec::new(),
+            },
+        );
         fake
     }
 
@@ -297,7 +309,10 @@ fn new_partial(state: &mut State, path: StoragePath, content: Vec<u8>) -> Resume
 
 fn node(path: &StoragePath, kind: EntryKind, content: Vec<u8>) -> Node {
     let size = (kind == EntryKind::File).then_some(ByteSize(content.len() as u64));
-    relabel(path, Node { kind, metadata: EntryMetadata { size, ..EntryMetadata::default() }, content })
+    relabel(
+        path,
+        Node { kind, metadata: EntryMetadata { size, ..EntryMetadata::default() }, content, tags: Vec::new() },
+    )
 }
 
 /// Recomputes name-derived metadata after a node changes its name.
@@ -504,7 +519,12 @@ impl ProviderFactory for FakeFactory {
         Ok(if traits.remote {
             builder
         } else {
-            builder.trasher(fake.clone()).permission_editor(fake.clone()).secure_eraser(fake.clone()).launcher(fake)
+            builder
+                .trasher(fake.clone())
+                .permission_editor(fake.clone())
+                .secure_eraser(fake.clone())
+                .tag_editor(fake.clone())
+                .launcher(fake)
         }
         .build())
     }
@@ -1398,6 +1418,11 @@ impl crate::ports::TextEmbedder for FakeTextEmbedder {
 
     fn relevance_floor(&self) -> f32 {
         0.3
+    }
+
+    /// Bag-of-words vectors of texts sharing most of their words.
+    fn grouping_threshold(&self) -> f32 {
+        0.5
     }
 
     fn embed_passages(

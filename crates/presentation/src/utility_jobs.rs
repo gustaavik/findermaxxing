@@ -13,6 +13,7 @@ use domain::{
 use crate::job_text::{UtilityJob, utility_title};
 use crate::operations_controller::qobject::{OperationsController, PermissionScope, ResizeMode};
 use crate::operations_controller::{NOT_READY_MESSAGE, decode_all, parents};
+use crate::organize_json::resolution_from_json;
 
 /// Characters of a permission edit string, per bit.
 const SET: char = '+';
@@ -108,6 +109,17 @@ impl OperationsController {
             affected,
             move |ctx| async move { use_case.execute(&items, edit, reach, &ctx).await.result },
         );
+    }
+
+    pub fn apply_organization(self: Pin<&mut Self>, plan: &QString, folder: &QString) {
+        let Some(resolution) = resolution_from_json(&plan.to_string()) else { return };
+        let Ok(folder) = StoragePath::decode(&folder.to_string()) else { return };
+        let Some(services) = self.app_services() else { return self.report(NOT_READY_MESSAGE) };
+        let title = format!("Organizing “{}”", folder.name().map(|n| n.display_name()).unwrap_or_default());
+        let mut affected: Vec<StoragePath> = resolution.folders_to_create.clone();
+        affected.push(folder);
+        let use_case = services.organize.apply;
+        self.spawn_job(title, affected, move |ctx| async move { use_case.execute(&resolution, &ctx).await.result });
     }
 
     pub fn secure_delete(self: Pin<&mut Self>, locations: &QStringList) {

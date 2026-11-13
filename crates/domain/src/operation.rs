@@ -4,6 +4,7 @@
 //! in turn the redo entry. Undo and redo are therefore the same mechanism.
 
 use crate::path::StoragePath;
+use crate::tags::Tag;
 use crate::units::UnixMode;
 
 /// Where a trashed item went, so it can be put back exactly.
@@ -46,6 +47,8 @@ pub enum Operation {
     /// New items made from others (archives, extracted folders, converted images).
     Created(Vec<StoragePath>),
     PermissionsChanged(Vec<(StoragePath, ModeChange)>),
+    /// Each item's tags before the change.
+    TagsChanged(Vec<(StoragePath, Vec<Tag>)>),
     /// Permanently deleted while undoing on a location without a Trash.
     /// Irreversible: nothing to redo.
     Deleted(Vec<StoragePath>),
@@ -68,6 +71,7 @@ pub enum OperationKind {
     ConvertImages,
     CleanMetadata,
     ChangePermissions,
+    Organize,
 }
 
 /// Something to execute that changes the filesystem without user prompts.
@@ -77,6 +81,8 @@ pub enum Action {
     Restore(Vec<TrashTicket>),
     Move(Vec<Relocation>),
     SetPermissions(Vec<(StoragePath, UnixMode)>),
+    /// Replaces each item's tags.
+    SetTags(Vec<(StoragePath, Vec<Tag>)>),
     Sequence(Vec<Action>),
 }
 
@@ -91,6 +97,7 @@ impl Operation {
             Self::Restored(tickets) => Action::Trash(tickets.iter().map(|t| t.original.clone()).collect()),
             Self::CreatedFolder(path) => Action::Trash(vec![path.clone()]),
             Self::Created(paths) => Action::Trash(paths.clone()),
+            Self::TagsChanged(before) => Action::SetTags(before.iter().rev().cloned().collect()),
             Self::PermissionsChanged(changes) => Action::SetPermissions(
                 changes.iter().rev().map(|(path, change)| (path.clone(), change.before)).collect(),
             ),
@@ -107,6 +114,7 @@ impl Operation {
             Self::Trashed(tickets) | Self::Restored(tickets) => tickets.is_empty(),
             Self::Deleted(paths) | Self::Created(paths) => paths.is_empty(),
             Self::PermissionsChanged(changes) => changes.is_empty(),
+            Self::TagsChanged(changes) => changes.is_empty(),
             Self::CreatedFolder(_) => false,
             Self::Sequence(parts) => parts.iter().all(Self::is_empty),
         }

@@ -9,6 +9,7 @@ mod bulk_rename_controller;
 mod checksum_controller;
 mod clipboard_bridge;
 mod clock_bridge;
+mod cloud_model_controller;
 mod disk_usage_controller;
 mod duplicates_controller;
 mod error_messages;
@@ -21,6 +22,8 @@ mod item_details_controller;
 mod job_reporting;
 mod job_text;
 mod operations_controller;
+mod organize_controller;
+mod organize_json;
 mod permissions_controller;
 mod preview_controller;
 mod quick_look_bridge;
@@ -38,8 +41,8 @@ mod utility_jobs;
 mod view_model;
 
 pub use services::{
-    AiSearch, AppServices, CloudDrives, FileOperations, IndexStatusFeed, ItemDetails, Offline, Places, RemoteAccounts,
-    SavedSearches, ServerAccounts, Utilities,
+    AiSearch, AppServices, CloudDrives, FileOperations, IndexStatusFeed, ItemDetails, Offline, Organize, Places,
+    RemoteAccounts, SavedSearches, ServerAccounts, Utilities,
 };
 
 /// Starts the Qt event loop and blocks until the last window closes.

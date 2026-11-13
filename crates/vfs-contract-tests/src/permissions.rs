@@ -39,3 +39,41 @@ where
     let result = fixture.vfs().set_permissions(&missing, UnixMode::from_mode(0o644)).await;
     assert_eq!(result, Err(VfsError::NotFound));
 }
+
+/// Expands to the native-tag contract cases.
+#[macro_export]
+macro_rules! tag_contract_tests {
+    ($make_fixture:expr $(, #[$attr:meta])*) => {
+        $crate::vfs_contract_tests!(@cases $make_fixture; [$(#[$attr])*];
+            tags_round_trip_and_clear,
+            tags_of_missing_items_are_not_found,
+        );
+    };
+}
+
+pub async fn tags_round_trip_and_clear<F>(fixture: &F)
+where
+    F: VfsFixture,
+    F::Vfs: application::ports::TagEditor,
+{
+    use application::ports::TagEditor;
+    fixture.create_file("bill.pdf", b"x").await;
+    let file = child(fixture, "bill.pdf");
+    assert!(fixture.vfs().tags(&file).await.unwrap().is_empty());
+    let tags = vec![domain::Tag::new("Invoice").unwrap(), domain::Tag::new("Home").unwrap()];
+    fixture.vfs().set_tags(&file, tags.clone()).await.unwrap();
+    assert_eq!(fixture.vfs().tags(&file).await.unwrap(), tags);
+    fixture.vfs().set_tags(&file, Vec::new()).await.unwrap();
+    assert!(fixture.vfs().tags(&file).await.unwrap().is_empty());
+}
+
+pub async fn tags_of_missing_items_are_not_found<F>(fixture: &F)
+where
+    F: VfsFixture,
+    F::Vfs: application::ports::TagEditor,
+{
+    use application::ports::TagEditor;
+    let missing = child(fixture, "missing");
+    assert_eq!(fixture.vfs().tags(&missing).await, Err(VfsError::NotFound));
+    assert_eq!(fixture.vfs().set_tags(&missing, Vec::new()).await, Err(VfsError::NotFound));
+}

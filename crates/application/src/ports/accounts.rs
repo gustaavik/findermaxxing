@@ -59,6 +59,8 @@ impl CredentialKey {
     const S3_SERVICE: &'static str = "FinderMaxxing S3";
     const SERVER_SERVICE: &'static str = "FinderMaxxing Servers";
     const DRIVE_SERVICE: &'static str = "FinderMaxxing Drives";
+    const CLOUD_MODEL_SERVICE: &'static str = "FinderMaxxing Cloud Model";
+    const CLOUD_MODEL_ACCOUNT: &'static str = "api-key";
 
     #[must_use]
     pub fn s3_secret(id: AccountId) -> Self {
@@ -69,6 +71,12 @@ impl CredentialKey {
     #[must_use]
     pub fn drive_token(id: AccountId) -> Self {
         Self { service: Self::DRIVE_SERVICE.to_owned(), account: id.to_string() }
+    }
+
+    /// The API key of the user's cloud model (organization suggestions).
+    #[must_use]
+    pub fn cloud_model_key() -> Self {
+        Self { service: Self::CLOUD_MODEL_SERVICE.to_owned(), account: Self::CLOUD_MODEL_ACCOUNT.to_owned() }
     }
 
     /// The password or key passphrase of a file-server account.

@@ -18,6 +18,7 @@ mod dropbox;
 mod google;
 mod graph;
 mod http;
+pub mod models;
 mod oauth;
 mod tree;
 
@@ -45,6 +46,10 @@ pub struct State {
     /// The next N API calls answer 429 with `Retry-After: 0`.
     pub rate_limit_next: u32,
     pub api_calls: u64,
+    /// Calls to the model APIs, in order.
+    pub model_calls: Vec<models::ModelCall>,
+    /// What the model APIs answer next: status and JSON body.
+    pub model_replies: std::collections::VecDeque<(u16, serde_json::Value)>,
 }
 
 /// A resumable upload in progress (Drive session, Dropbox session, Graph session).
@@ -85,6 +90,8 @@ impl MockCloud {
             next_upload: 0,
             rate_limit_next: 0,
             api_calls: 0,
+            model_calls: Vec::new(),
+            model_replies: std::collections::VecDeque::new(),
         }));
         let shared = Arc::clone(&state);
         tokio::spawn(async move {
